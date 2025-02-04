@@ -1,45 +1,19 @@
 import cv2
 import numpy as np
 import os
-import csv
-import matplotlib.pyplot as plt
 import shutil
 import mediapipe as mp
 
 # Extraer los frames y guardarlos en una carpeta
 def ObtenerFrames(rutaVideo, rutaCarpeta, rutaTrazos):
-    if not os.path.exists(rutaCarpeta):
-        os.mkdir(rutaCarpeta)
-        print("Carpeta creada corrrectamente" )
-    else:
-        print("Ya existe esa carpeta" )
+    # Eliminar carpeta si ya existe
+    for carpeta in [rutaCarpeta, rutaTrazos]:
+        if os.path.exists(carpeta):
+            shutil.rmtree(carpeta)  # Elimina todo el contenido de la carpeta
+            print(f"Se eliminó la carpeta: {carpeta}")
         
-        for filename in os.listdir(rutaCarpeta):
-            file_path = os.path.join(rutaCarpeta, filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception as e:
-                print('No se pudo eliminar')
-                
-    # para la carpeta de los trazos
-    if not os.path.exists(rutaTrazos):
-        os.mkdir(rutaTrazos)
-        print("Carpeta creada corrrectamente" )
-    else:
-        print("Ya existe esa carpeta" )
-        
-        for filename in os.listdir(rutaTrazos):
-            file_path = os.path.join(rutaTrazos, filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception as e:
-                print('No se pudo eliminar')
+        os.makedirs(carpeta)  # Se vuelve a crear la carpeta vacía
+        print(f"Carpeta creada: {carpeta}")
 
     cap = cv2.VideoCapture(rutaVideo)
     if not cap.isOpened():
@@ -50,25 +24,28 @@ def ObtenerFrames(rutaVideo, rutaCarpeta, rutaTrazos):
     
     while True:
         ret, frame = cap.read()
+        if not ret:
+            break  # Sale del bucle si no hay más frames
         
-        if ret:
-            if cont_frames % 10 == 0:  
-                
-                # preprocesamiento 1. equalizacion de histograma a las imagenes
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # primero se convierte a grises
-                equalizado = cv2.equalizeHist(frame)
-                
-                
-                # guardado de las imágenes
-                name = 'frame' + str(cont_frames) + '.jpg'
-                print(name)
-                
-                result = cv2.imwrite(os.path.join(rutaCarpeta, name), equalizado)
-                if not result:
-                    print(f"Error.")
-            cont_frames += 1
-        else:
-            break
-    
+        if cont_frames % 10 == 0:  
+            # Preprocesamiento: Ecualización de histograma
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convertir a escala de grises
+            equalizado = cv2.equalizeHist(frame)
+            
+            # Guardar la imagen
+            nombre_imagen = f'frame{cont_frames}.jpg'
+            ruta_imagen = os.path.join(rutaCarpeta, nombre_imagen)
+            resultado = cv2.imwrite(ruta_imagen, equalizado)
+            
+            if resultado:
+                print(f"Guardado: {nombre_imagen}")
+            else:
+                print(f"Error al guardar {nombre_imagen}")
+
+        cont_frames += 1
+
     cap.release()
     print("Extracción completada")
+
+# Ejemplo de uso
+# ObtenerFrames('./dataset/sospechoso/1.mp4', './frames/sospechoso/1', './trazos/sospechoso/1')
