@@ -2,8 +2,8 @@
 from ultralytics import YOLO  # Importar el modelo YOLO de Ultralytics
 import cv2                   # Importar la biblioteca OpenCV
 import math                  # Importar el módulo math para operaciones matemáticas
-
-
+import featureExtraction as fe  # Importar el módulo featureExtraction para las caracteristicas
+import numpy as np            # Importar la biblioteca NumPy
 """ 
 Notas:
     * Trabajar para ver como juntar lo modelos de mano y persona 
@@ -12,93 +12,93 @@ Notas:
     
     * El entrenamiento de manos se realizó con 10 epocas
 """
-# Ruta del archivo de video
-video_path = "./dataset/sospechoso/1.mp4"  # Cambia esta ruta por la ubicación de tu archivo de video
 
-def modelo(video_path):
-    cap = cv2.VideoCapture(video_path)   
-    
-    if not cap.isOpened():  # Verificar si el video se abre correctamente
-        print("Error: No se puede abrir el video.")
-        exit()
-
-    # Cargar el modelo YOLO
-    model = YOLO("yolo-Weights/yolov8n.pt")  # Cargar el modelo YOLOv8 con pesos pre-entrenados
-
-    model = YOLO("./runs/detect/train4/weights/best.pt")
-
-    # Definir las clases de objetos para la detección
-    classNames = ["persona", "bicicleta", "coche", "motocicleta", "avión", "autobús", "tren", "camión", "bote",
-                "semáforo", "boca de incendios", "señal de stop", "parquímetro", "banco", "pájaro", "gato",
-                "perro", "caballo", "oveja", "vaca", "elefante", "oso", "cebra", "jirafa", "mochila", "paraguas",
-                "bolso", "corbata", "maleta", "frisbee", "esquís", "snowboard", "balón deportivo", "cometa", "bate de béisbol",
-                "guante de béisbol", "monopatín", "tabla de surf", "raqueta de tenis", "botella", "copa de vino", "taza",
-                "tenedor", "cuchillo", "cuchara", "cuenco", "plátano", "manzana", "sándwich", "naranja", "brócoli",
-                "zanahoria", "perrito caliente", "pizza", "donut", "pastel", "silla", "sofá", "planta en maceta", "cama",
-                "mesa de comedor", "retrete", "monitor de TV", "ordenador portátil", "ratón", "control remoto", "teclado", "teléfono móvil",
-                "microondas", "horno", "tostadora", "fregadero", "refrigerador", "libro", "reloj", "florero", "tijeras",
-                "oso de peluche", "secador de pelo", "cepillo de dientes", "mano"
-                ]
-
-    claseDeseada = ["persona",  "mano"]
+# Cargar ambos modelos
+modelo_personas = YOLO("yolo-Weights/yolov8n.pt")  # Modelo entrenado para personas
+modelo_manos = YOLO("./runs/detect/train4/weights/best.pt")  # Modelo entrenado para manos
 
 
-    # Bucle para capturar fotogramas del video
+# Función para las borderboxes
+def procesar_detecciones(resultados, color, etiqueta,img,centroides_actuales):
+    for r in resultados:
+        for box in r.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            confianza = math.ceil((box.conf[0] * 100)) / 100
+            
+            cx, cy = fe.calcular_centroide(x1, y1, x2, y2)  # Calcular el centroide
+            
+            print(f"{etiqueta} - Centroide: ({cx}, {cy}) - Confianza: {confianza}")
+            
+            key = f"{etiqueta}_{len(centroides_actuales)}"
+            centroides_actuales[key] = (cx, cy)
+            
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
+            cv2.putText(img, etiqueta, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        1, color, 2)
+            
+            cv2.circle(img, (cx, cy), 5, color, -1)
+            
+            
+# Función principal donde se procesa el video
+def modelo(video_path): 
+    centroides_anteriores = {}
+
+    cap = cv2.VideoCapture(video_path)
+
+    frame_anterior = None
+
+    # Obtener FPS del video
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
     while True:
-        # Leer un fotograma del video
         success, img = cap.read()
-
-        # Si no se puede leer el fotograma, el video ha terminado
         if not success:
             break
 
-        # Realizar la detección de objetos utilizando el modelo YOLO en el fotograma capturado
-        results = model(img, stream=True)
+        frame_actual = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        centroides_actuales = {}
+        
+        # Detección con ambos modelos
+        resultados_personas = modelo_personas(img, stream=True)
+        resultados_manos = modelo_manos(img, stream=True)
 
-        # Iterar a través de los resultados de la detección de objetos
-        for r in results:
-            boxes = r.boxes  # Extraer las cajas delimitadoras de los objetos detectados
+        # Dibujar detecciones en la imagen
+        procesar_detecciones(resultados_personas, (255, 0, 0), "Persona", img, centroides_actuales)
+        procesar_detecciones(resultados_manos, (0, 255, 0), "Mano", img, centroides_actuales)
+        
+        # Calcular flujo óptico de los centroides
+        centroides_actualizados = fe.flujoOptico(centroides_actuales, frame_anterior, frame_actual)
 
-            # Iterar a través de cada caja delimitadora
-            for box in boxes:
-                # Extraer coordenadas de la caja delimitadora
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)  # Convertir a valores enteros
+        # Calcular desplazamiento y velocidad
+        desplazamientos = fe.desplazamientoPixeles(centroides_anteriores, centroides_actualizados)
+        velocidades = fe.velocidadDesplazamiento(centroides_anteriores, centroides_actualizados, fps)
 
-                # Dibujar la caja delimitadora en el fotograma
-                cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 3)
+        # Imprimir los desplazamientos y velocidades
+        for key in desplazamientos:
+            print(f"{key} - Desplazamiento: {desplazamientos[key]:.2f} píxeles")
+        for key in velocidades:
+            print(f"{key} - Velocidad: {velocidades[key]:.2f} píxeles/seg")
 
-                # Calcular e imprimir la puntuación de confianza de la detección
-                confidence = math.ceil((box.conf[0]*100))/100
+        # Mostrar el flujo óptico y el movimiento en la imagen
+        for key, (cx, cy) in centroides_actualizados.items():
+            if key in centroides_anteriores:
+                cx_ant, cy_ant = centroides_anteriores[key]
+                cv2.arrowedLine(img, (cx_ant, cy_ant), (cx, cy), (0, 255, 255), 2)
 
-                # Determinar e imprimir el nombre de la clase del objeto detectado
-                cls = int(box.cls[0])
-                
-                if classNames[cls] in claseDeseada:
-                    print(f"Detectado: {classNames[cls]} con {confidence} de confianza")
+        frame_anterior = frame_actual.copy()
+        centroides_anteriores = centroides_actualizados.copy()
 
-                    # Dibujar la caja en la imagen
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 3)
-                    cv2.putText(img, classNames[cls], (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                                1, (255, 0, 0), 2)
-
-                    # Dibujar texto indicando el nombre de la clase en el fotograma
-                    org = [x1, y1]
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    fontScale = 1
-                    color = (255, 0, 0)
-                    thickness = 2
-                    cv2.putText(img, classNames[cls], org, font, fontScale, color, thickness)
-
-        # Mostrar el fotograma con los objetos detectados en una ventana llamada "Video"
         cv2.imshow('Video', img)
 
-        # Comprobar si se presionó la tecla 'q' para salir del bucle
         if cv2.waitKey(1) == ord('q'):
             break
 
-    # Liberar el video
     cap.release()
-
-    # Cerrar todas las ventanas de OpenCV
     cv2.destroyAllWindows()
+
+
+# Ruta del archivo de video
+video_path = "./dataset/sospechoso/1.mp4"
+
+# Llamar a la función principal           
+modelo(video_path)
