@@ -4,7 +4,9 @@ import os
 import shutil
 import mediapipe as mp
 
-# Extraer los frames y guardarlos en una carpeta
+""" 
+Extraer los frames de un video y guardarlos en una carpeta 
+"""
 
 def ObtenerFrames(rutaVideo, rutaCarpeta, rutaTrazos):
     # Eliminar carpeta si ya existe

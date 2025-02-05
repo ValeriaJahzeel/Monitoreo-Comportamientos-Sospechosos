@@ -1,0 +1,3 @@
+https://github.com/RionDsilvaCS/yolo-hand-pose
+https://docs.ultralytics.com/es/datasets/pose/hand-keypoints/
+https://www.kaggle.com/code/zeyadkhalid/yolov8-train-on-custom-dataset-hand-detection

@@ -9,6 +9,8 @@ import getFrame as gf
 """ 
 Esta sección extrae los frames de un video y guarda las 
 coordenadas de los landmarks en un archivo CSV 
+
+Ocupa MEDIAPIPE para obtener los landmarks de las poses
 """
 
 def framesVideos(rutaVideos, rutaFrames, rutaCSV, rutaTrazos):
