@@ -1,3 +1,15 @@
 https://github.com/RionDsilvaCS/yolo-hand-pose
 https://docs.ultralytics.com/es/datasets/pose/hand-keypoints/
 https://www.kaggle.com/code/zeyadkhalid/yolov8-train-on-custom-dataset-hand-detection
+
+
+
+inclinación, duración del movimiento
+para analizar los datos, se puede usar PANDAS
+no usar conjuntos que pueden provocar sesgos
+tener a la mano las caracteristicas del dataset de entrenamiento
+realizar mas preprocesamiento a los videos
+subir el nivel de confianza de yolo, para que no acepte todos los "objetos"
+que el flujo optico se centre en el cuadro envolvente y tal vez no en el centroide
+
+hacer un reporte/diapositiva/registro con los avances/propuestas del proyecto
