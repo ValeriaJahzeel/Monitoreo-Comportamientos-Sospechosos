@@ -4,9 +4,13 @@ import os
 import csv
 import shutil
 import mediapipe as mp
-import obtenerFrames as of
+import getFrame as gf
 
-# Extraer frames de varios videos
+""" 
+Esta sección extrae los frames de un video y guarda las 
+coordenadas de los landmarks en un archivo CSV 
+"""
+
 def framesVideos(rutaVideos, rutaFrames, rutaCSV, rutaTrazos):
     for i in range(1, 4):
         video = os.path.join(rutaVideos, f"{i}.mp4")
@@ -22,7 +26,7 @@ def framesVideos(rutaVideos, rutaFrames, rutaCSV, rutaTrazos):
             os.makedirs(carpeta)
             print(f"Carpeta creada: {carpeta}")
 
-        of.ObtenerFrames(video, frames, trazos)
+        gf.ObtenerFrames(video, frames, trazos)
 
         # Obtener la lista de frames del video
         nombres = sorted([os.path.join(frames, f) for f in os.listdir(frames)])

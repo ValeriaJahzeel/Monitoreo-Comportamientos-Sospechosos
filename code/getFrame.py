@@ -5,6 +5,7 @@ import shutil
 import mediapipe as mp
 
 # Extraer los frames y guardarlos en una carpeta
+
 def ObtenerFrames(rutaVideo, rutaCarpeta, rutaTrazos):
     # Eliminar carpeta si ya existe
     for carpeta in [rutaCarpeta, rutaTrazos]:
