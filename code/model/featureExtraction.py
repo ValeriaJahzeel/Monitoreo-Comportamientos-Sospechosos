@@ -87,34 +87,51 @@ def deteccionPostura():
     pass
 
 
-# Calcula el flujo optico a partir de los centroides de los objetos detectados
-centroides_anteriores = {}  
-def flujoOptico(centroides_actuales, frame_anterior, frame_actual):
-    global centroides_anteriores
-
-    # Parámetros de Lucas-Kanade
-    lk_params = dict(winSize=(15, 15), maxLevel=2, 
-                     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
-
-    if frame_anterior is None or not centroides_anteriores:
-        centroides_anteriores = centroides_actuales.copy()
-        return centroides_actuales  # No hay flujo óptico en el primer frame
-
-    # solo los centroides se calculan
-    puntos_anteriores = np.array(list(centroides_anteriores.values()), dtype=np.float32).reshape(-1, 1, 2)
+def flujoOptico(frame_anterior, frame_actual, bboxes):
+    centroides_actualizados = {}
     
-    # flujo óptico SOLO en los centroides
-    puntos_actuales, status, _ = cv2.calcOpticalFlowPyrLK(frame_anterior, frame_actual, puntos_anteriores, None, **lk_params)
-
-    if puntos_actuales is not None:
-        for i, key in enumerate(centroides_anteriores.keys()):
-            if status[i]:
-                cx, cy = puntos_actuales[i].ravel()
-                centroides_actuales[key] = (int(cx), int(cy))  
-
-    centroides_anteriores = centroides_actuales.copy()
-    return centroides_actuales
-
+    if frame_anterior is None:
+        return centroides_actualizados
+        
+    for key, bbox in bboxes.items():
+        x1, y1, x2, y2 = bbox
+        
+        # Extraer la región de interés (ROI) de ambos frames
+        roi_anterior = frame_anterior[y1:y2, x1:x2]
+        roi_actual = frame_actual[y1:y2, x1:x2]
+        
+        # Verificar que las ROIs no estén vacías
+        if roi_anterior.size == 0 or roi_actual.size == 0:
+            continue
+            
+        # Calcular el flujo óptico solo en la ROI
+        flow = cv2.calcOpticalFlowFarneback(
+            roi_anterior, 
+            roi_actual,
+            None,
+            0.5,  # pyr_scale
+            3,    # levels
+            15,   # winsize
+            3,    # iterations
+            5,    # poly_n
+            1.2,  # poly_sigma
+            0     # flags
+        )
+        
+        # Calcular el desplazamiento promedio dentro del bbox
+        mean_flow = np.mean(flow, axis=(0, 1))
+        
+        # Calcular el centroide del bbox
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        
+        # Actualizar la posición del centroide según el flujo óptico
+        new_cx = int(cx + mean_flow[0])
+        new_cy = int(cy + mean_flow[1])
+        
+        centroides_actualizados[key] = (new_cx, new_cy)
+    
+    return centroides_actualizados
 
 # Calcula la densidad de movimiento en una región de interés (que tanto movimiento hay en un frame)
 # El resultado está normalizado con respecto al área total del frame (de 0 a 1)
