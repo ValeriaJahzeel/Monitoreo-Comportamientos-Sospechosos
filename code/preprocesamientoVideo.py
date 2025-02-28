@@ -3,6 +3,13 @@ import numpy as np
 import os
 
 def mejorar_video(ruta_entrada, carpeta_salida="videos_mejorados"):
+    """
+    Aplica múltiples técnicas de mejora a un video y lo guarda en formato MP4.
+    
+    Args:
+        ruta_entrada (str): Ruta del video de entrada
+        carpeta_salida (str): Nombre de la carpeta donde guardar los videos mejorados
+    """
     # Crear carpeta de salida si no existe
     if not os.path.exists(carpeta_salida):
         os.makedirs(carpeta_salida)
@@ -24,9 +31,23 @@ def mejorar_video(ruta_entrada, carpeta_salida="videos_mejorados"):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    # Configurar el escritor de video
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(ruta_salida, fourcc, fps, (width, height))
+    # Configurar el escritor de video con codec H.264
+    if os.name == 'nt':  # Windows
+        fourcc = cv2.VideoWriter_fourcc(*'H264')
+    else:  # Linux/Mac
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    
+    temp_output = os.path.join(carpeta_salida, "temp_output.mp4")
+    out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
+    
+    if not out.isOpened():
+        print("Error: No se pudo crear el archivo de salida. Intentando con codec alternativo...")
+        # Intentar con codec alternativo
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
+        if not out.isOpened():
+            print("Error: No se pudo inicializar el VideoWriter")
+            return
     
     # Crear objeto CLAHE
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
@@ -49,7 +70,7 @@ def mejorar_video(ruta_entrada, carpeta_salida="videos_mejorados"):
             
         # Mostrar progreso
         frame_count += 1
-        if frame_count % 30 == 0:  # Actualizar cada 30 frames
+        if frame_count % 30 == 0:
             print(f"Progreso: {frame_count}/{total_frames} frames ({(frame_count/total_frames*100):.1f}%)")
         
         # 1. Aplicar CLAHE
@@ -68,9 +89,24 @@ def mejorar_video(ruta_entrada, carpeta_salida="videos_mejorados"):
     # Liberar recursos
     cap.release()
     out.release()
-    print(f"\nVideo mejorado guardado en: {ruta_salida}")
+    
+    # Renombrar el archivo temporal al nombre final
+    if os.path.exists(temp_output):
+        if os.path.exists(ruta_salida):
+            os.remove(ruta_salida)
+        os.rename(temp_output, ruta_salida)
+        print(f"\nVideo mejorado guardado en: {ruta_salida}")
+    else:
+        print("Error: No se pudo generar el video de salida")
 
 def procesar_carpeta(carpeta_entrada, carpeta_salida="videos_mejorados"):
+    """
+    Procesa todos los videos MP4 en una carpeta y los guarda en una carpeta específica.
+    
+    Args:
+        carpeta_entrada (str): Ruta de la carpeta con los videos originales
+        carpeta_salida (str): Nombre de la carpeta donde guardar los videos mejorados
+    """
     if not os.path.exists(carpeta_entrada):
         print(f"La carpeta de entrada {carpeta_entrada} no existe")
         return
@@ -81,6 +117,7 @@ def procesar_carpeta(carpeta_entrada, carpeta_salida="videos_mejorados"):
             ruta_video = os.path.join(carpeta_entrada, archivo)
             mejorar_video(ruta_video, carpeta_salida)
 
+# Ejemplo de uso
 if __name__ == "__main__":
     # Para procesar un solo video:
     # mejorar_video("./dataset/sospechoso/a1.mp4", "videos_mejorados")

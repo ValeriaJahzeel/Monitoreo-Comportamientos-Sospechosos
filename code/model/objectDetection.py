@@ -2,21 +2,12 @@
 from ultralytics import YOLO 
 import cv2                 
 import math                  
-import featureExtraction as fe  # Importar el módulo featureExtraction para las caracteristicas
+import featureExtraction as fe  # Importar el módulo featureExtraction para las características
 import numpy as np            
 import csv
 import os
 
-""" 
-Notas:
-    * Darle mas entrenamiento al modelo ya que no detecta bien a personas volteadas o desde el angulo arriba
-    * Da muchos falsos positivos, ve personas donde no las hay
-    
-    * El archivo de excel con las caracteristicas es demasiado grande, se podria reducir saltando algunos frames
-    
-    * El entrenamiento de manos se realizó con 10 epocas
-"""
-
+# Modelos YOLO
 modelo_personas = YOLO("yolo-Weights/yolov8n.pt")  # Modelo entrenado para personas
 modelo_manos = YOLO("./runs/detect/train4/weights/best.pt")  # Modelo entrenado para manos
 
@@ -41,21 +32,22 @@ def procesar_detecciones(resultados, color, etiqueta, img, centroides_actuales, 
                 cv2.putText(img, etiqueta, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
 
-
-            
 # Función principal donde se procesa el video
 def modelo(video_path): 
     centroides_anteriores = {}
     velocidades_anteriores = {}
     datos_frame = []
+    objetos_en_area = {}  # Diccionario para contar los frames que un objeto está en un área
 
     cap = cv2.VideoCapture(video_path)
-
-    frame_anterior = None
-    frame_num = 0  # Contador de frames
-
-    # Obtener FPS del video
     fps = cap.get(cv2.CAP_PROP_FPS)
+
+    ret, primer_frame = cap.read()
+    if not ret:
+        return
+        
+    frame_anterior = cv2.cvtColor(primer_frame, cv2.COLOR_BGR2GRAY)
+    frame_num = 0
 
     while True:
         success, img = cap.read()
@@ -71,32 +63,53 @@ def modelo(video_path):
         resultados_manos = modelo_manos(img, stream=True)
 
         # Dibujar boundingboxes en la imagen
-        procesar_detecciones(resultados_personas, (255, 0, 0), "Persona", img, centroides_actuales,bbox_actuales)
-        procesar_detecciones(resultados_manos, (0, 255, 0), "Mano", img, centroides_actuales,bbox_actuales)
+        procesar_detecciones(resultados_personas, (255, 0, 0), "Persona", img, centroides_actuales, bbox_actuales)
+        procesar_detecciones(resultados_manos, (0, 255, 0), "Mano", img, centroides_actuales, bbox_actuales)
         
- 
         # Calcular flujo óptico de los centroides
-        centroides_actualizados = fe.flujoOptico(frame_anterior, frame_actual, bbox_actuales)
+        flujos_por_bbox, _ = fe.flujoOptico(frame_anterior, frame_actual, bbox_actuales)
+        img = fe.visualizar_flujo(img, flujos_por_bbox, bbox_actuales)
 
-        frame_dimensiones = img.shape[:2]  # Obtener alto y ancho del frame
+        frame_dimensiones = img.shape[:2]
 
-        # Calcular desplazamiento, velocidad, aceleracion
-        desplazamientos = fe.desplazamientoPixeles(centroides_anteriores, centroides_actualizados)
-        velocidades = fe.velocidadDesplazamiento(centroides_anteriores, centroides_actualizados, fps)
+        # Calcular métricas
+        desplazamientos = fe.desplazamientoPixeles(centroides_anteriores, centroides_actuales)
+        velocidades = fe.velocidadDesplazamiento(centroides_anteriores, centroides_actuales, fps)
         aceleraciones = fe.aceleracionDesplazamiento(velocidades_anteriores, velocidades, fps)
-        densidad = fe.densidadMovimiento(centroides_actualizados, frame_dimensiones)
+        densidad = fe.densidadMovimiento(centroides_actuales, frame_dimensiones)
+        direcciones = fe.direccionMovimiento(centroides_anteriores, centroides_actuales)
+        posturas = fe.deteccionPostura(bbox_actuales)
 
-        # Imprimir los desplazamientos y velocidades
+        # Calcular tiempo de permanencia y permanencia en área
+        for key in centroides_actuales:
+            if key in objetos_en_area:
+                objetos_en_area[key] += 1
+            else:
+                objetos_en_area[key] = 1
+
+        tiempos_permanencia = fe.tiempoPermanencia(objetos_en_area, fps)
+        permanencia_area = fe.permanenciaArea(objetos_en_area, fps)
+
+        # Imprimir métricas
         for key in desplazamientos:
             print(f"{key} - Desplazamiento: {desplazamientos[key]:.2f} píxeles")
         for key in velocidades:
             print(f"{key} - Velocidad: {velocidades[key]:.2f} píxeles/seg")
         for key in aceleraciones:
             print(f"{key} - Aceleración: {aceleraciones[key]:.2f} píxeles/seg²")
+        for key in direcciones:
+            print(f"{key} - Dirección: {direcciones[key]:.2f} grados")
+        for key in posturas:
+            print(f"{key} - Postura: {posturas[key]}")
+        for key in tiempos_permanencia:
+            print(f"{key} - Tiempo Permanencia: {tiempos_permanencia[key]:.2f} seg")
+        for key in permanencia_area:
+            print(f"{key} - Permanencia Área: {permanencia_area[key]:.2f} seg")
 
         print(f"Densidad de movimiento: {densidad:.6f}")
 
-        for key, (cx, cy) in centroides_actualizados.items():
+        # Guardar datos del frame
+        for key, (cx, cy) in centroides_actuales.items():
             if key in desplazamientos and key in velocidades and key in aceleraciones:
                 datos_frame.append({
                     "Frame": frame_num,
@@ -105,30 +118,25 @@ def modelo(video_path):
                     "Centroide_Y": cy,
                     "Desplazamiento": desplazamientos[key],
                     "Velocidad": velocidades[key],
-                    "Aceleración": aceleraciones[key],
-                    "Densidad": densidad
+                    "Aceleracion": aceleraciones[key],
+                    "Densidad": densidad,
+                    "Direccion": direcciones.get(key, None),
+                    "Tiempo_Permanencia": tiempos_permanencia.get(key, None),
+                    "Postura": posturas.get(key, None),
+                    "Permanencia_Area": permanencia_area.get(key, None)
                 })
-            else:
-                print(f"Advertencia: La clave {key} no está en los diccionarios de desplazamientos, velocidades o aceleraciones.")
 
+        # Guardar datos en CSV
+        fe.guardar_datos_csv("archivooooo.csv", datos_frame)
 
-        # Guardar los datos del frame actual en el CSV
-        fe.guardar_datos_csv("datos_movimiento.csv", datos_frame)
-
-        # Mostrar el flujo óptico y el movimiento en la imagen
-        for key, (cx, cy) in centroides_actualizados.items():
-            if key in centroides_anteriores:
-                cx_ant, cy_ant = centroides_anteriores[key]
-                cv2.arrowedLine(img, (cx_ant, cy_ant), (cx, cy), (0, 255, 255), 2)
-
-        # Actualizar datos
+        # Mostrar frame
+        cv2.imshow('Video', img)
+        
+        # Actualizar datos para el siguiente frame
         frame_anterior = frame_actual.copy()
         velocidades_anteriores = velocidades.copy()
-        centroides_anteriores = centroides_actualizados.copy()
-
-        frame_num += 1  # Aumentar contador de frames
-
-        cv2.imshow('Video', img)
+        centroides_anteriores = centroides_actuales.copy()
+        frame_num += 1
 
         if cv2.waitKey(1) == ord('q'):
             break
@@ -138,7 +146,7 @@ def modelo(video_path):
 
 
 # Ruta del archivo de video
-video_path = "./dataset/sospechoso/3.mp4"
+video_path = "./videos_mejorados/1_enhanced.mp4"
 
 # Llamar a la función principal           
 modelo(video_path)
