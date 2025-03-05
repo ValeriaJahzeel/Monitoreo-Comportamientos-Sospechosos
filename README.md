@@ -1,14 +1,31 @@
-# Monitoreo-Comportamientos-Sospechosos
+# Algoritmo de detección de patrones de movimiento para la identificación de allanamiento de morada usando visión computacional
 
-## Descripción del proyecto
-Lo que se va a hacer es un algoritmo que permitirá clasificar conductas anómalas
-a las afueras de una vivienda, con anómalas se refiere a intentos de abrir las puertas y/o ventanas, 
-a saltar bardas y a quedarse de pie mucho tiempo afuera de la casa.
+El objetivo de este proyecto es desarrollar un algoritmo de detección de comportamientos sospechosos en videos de vigilancia de casa habitación, enfocándose en el merodeo y los intentos de allanamiento. 
+Se recopilaron videos del UCF Crime Dataset y YouTube, mejorando su calidad mediante ecualización de histograma. Utilizando el flujo óptico, se analizaron movimientos en los cuadros para identificar posiciones y trayectorias clave. El algoritmo utiliza redes neuronales convolucionales (CNN) para la identificar personas y manos, también utiliza un perceptron multi- calpa (MLP) para clasificar comportamientos en merodeo (permanencia mayor a 15 segundos) y forzar accesos (movimientos sospechosos cerca de puertas o ventanas).
 
-## Primera iteración
-Para la primera iteración se obtendrá el dataset y se realizará el protocolo de investigación
-este se encuentra en el archivo DPF-A00.docx.
+## Comenzando 🚀
 
-Para el dataset se obtendrán algunos videos de UCF Crime dataset y posteriormente se les
-realizará un preprocesamiento para haerlos más legibles para el modelo. Hasta ahora el dataset
-cuenta con 40 videos de entre 5 segundos y 1 minuto de duración.
+Solo clona el proyecto en tu repositorio y descarga el dataset del siguiente link de drive:
+
+[aqui segun va el link xd]
+
+### Pre-requisitos 📋
+
+Debes tener instaladas las siguientes bibiliotecas
+* cv2
+```
+pip install opencv-python
+```
+* numpy
+```
+pip install numpy
+```
+
+## Construido con 🛠️
+
+![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
+
+## Autores ✒️
+
+* **Valeria Castañón** - *Trabajo Inicial* - [ValeriaJahzeel](https://github.com/ValeriaJahzeel)
+
