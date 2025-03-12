@@ -9,15 +9,17 @@ import numpy as np
 import csv
 import os
 
-
-# Calcula el centroide de los bounding box
+"""
+Calcula el centroide de los bounding box
+"""
 def calcular_centroide(x1, y1, x2, y2):  
     cx = (x1 + x2) // 2
     cy = (y1 + y2) // 2
     return cx, cy
 
-
-# Calcula el desplazamiento en pixeles de los centroides entre dos frames consecutivos
+"""
+Calcula el desplazamiento en pixeles de los centroides entre dos frames consecutivos
+"""
 def desplazamientoPixeles(centroides_anteriores, centroides_actuales):
     desplazamientos = {}
     
@@ -38,8 +40,9 @@ def desplazamientoPixeles(centroides_anteriores, centroides_actuales):
 
     return desplazamientos
 
-
-# Calcula la velocidad de desplazamiento en píxeles/segundo.
+"""
+Calcula la velocidad de desplazamiento en píxeles/segundo
+"""
 def velocidadDesplazamiento(centroides_anteriores, centroides_actuales, fps):
     velocidades = {}
 
@@ -58,8 +61,9 @@ def velocidadDesplazamiento(centroides_anteriores, centroides_actuales, fps):
 
     return velocidades
 
-
-# Calcula la aceleración de desplazamiento en píxeles/seg².
+"""
+Calcula la aceleración de desplazamiento en píxeles/seg²
+"""
 def aceleracionDesplazamiento(velocidades_anteriores, velocidades_actuales, fps):
     aceleraciones = {}
 
@@ -77,6 +81,9 @@ def aceleracionDesplazamiento(velocidades_anteriores, velocidades_actuales, fps)
 
     return aceleraciones
 
+"""
+Calcula el angulo de movimiento de la persona en el frame actual con respecto al frame anterior
+"""
 def direccionMovimiento(centroides_anteriores, centroides_actuales):
     direcciones = {}
 
@@ -113,6 +120,9 @@ def tiempoPermanencia(objetos_en_area, fps):
 
     return tiempos
 
+"""
+Calcula la postura en la que se encuentra la persona en ese momento, si esta vertical, horizontal o neutral
+"""
 def deteccionPostura(bboxes):
     posturas = {}
 
@@ -138,11 +148,11 @@ def deteccionPostura(bboxes):
 
     return posturas
 
-
+"""
+Visualiza el flujo óptico con líneas de colores que representan el movimiento
+"""
 def visualizar_flujo(img, flujos_por_bbox, bboxes):
-    """
-    Visualiza el flujo óptico con líneas de colores que representan el movimiento
-    """
+    
     # Crear una máscara para dibujar las líneas de flujo
     mask = np.zeros_like(img)
     
@@ -178,6 +188,9 @@ def visualizar_flujo(img, flujos_por_bbox, bboxes):
     
     return img_con_flujo
 
+"""
+Calcula puntos característicos para obtener el flujo óptico en una región de interés (ROI)
+"""
 def calcular_puntos_caracteristicos(frame, bbox):
     x1, y1, x2, y2 = bbox
     roi = frame[y1:y2, x1:x2]
@@ -200,6 +213,9 @@ def calcular_puntos_caracteristicos(frame, bbox):
         return puntos
     return None
 
+"""
+Obtiene el flujo optico de Lucas-Kannade de los puntos caracteristivcos
+"""
 def flujoOptico(frame_anterior, frame_actual, bboxes):
     if frame_anterior is None:
         return {}, {}
@@ -236,8 +252,10 @@ def flujoOptico(frame_anterior, frame_actual, bboxes):
     
     return flujos_por_bbox, puntos_por_bbox
 
-# Calcula la densidad de movimiento en una región de interés (que tanto movimiento hay en un frame)
-# El resultado está normalizado con respecto al área total del frame (de 0 a 1)
+"""
+Calcula la densidad de movimiento en una región de interés (que tanto movimiento hay en un frame)
+El resultado está normalizado con respecto al área total del frame (de 0 a 1)
+"""
 def densidadMovimiento(centroides_actuales, frame_dimensiones):
     if not centroides_actuales or not frame_dimensiones:
         print("Error: No hay datos de centroides o dimensiones del frame.")
@@ -254,7 +272,40 @@ def densidadMovimiento(centroides_actuales, frame_dimensiones):
 
     return densidad
 
-
+def flujoOpticoDenso(frame_anterior, frame_actual):
+     if frame_anterior is None:
+        return {}, {}
+    
+    
+    prvs = cv2.cvtColor(frame_anterior,cv2.COLOR_BGR2GRAY)
+    hsv = np.zeros_like(frame_anterior)
+    hsv[...,1] = 255
+    
+    while(1):
+        ret, frame2 = cap.read()
+        next = cv2.cvtColor(frame2,cv2.COLOR_BGR2GRAY)
+        
+        flow = cv2.calcOpticalFlowFarneback(prvs,next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        
+        mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
+        hsv[...,0] = ang*180/np.pi/2
+        hsv[...,2] = cv2.normalize(mag,None,0,255,cv2.NORM_MINMAX)
+        rgb = cv2.cvtColor(hsv,cv2.COLOR_HSV2BGR)
+        
+        cv2.imshow('frame2',rgb)
+        k = cv2.waitKey(30) &amp; 0xff
+        if k == 27:
+            break
+        elif k == ord('s'):
+            cv2.imwrite('opticalfb.png',frame2)
+            cv2.imwrite('opticalhsv.png',rgb)
+        prvs = next
+    
+    cap.release()
+    cv2.destroyAllWindows()
+    return
+    
+    
 def permanenciaArea(objetos_en_area, fps):
     tiempos = {}
 
@@ -268,7 +319,10 @@ def permanenciaArea(objetos_en_area, fps):
 
     return tiempos
 
-# Guarda los datos de cada frame en un archivo CSV
+"""
+Guarda los datos obtenidos de cada una de las funciones anteriores en un archivo CSV
+Los datos se guardan por frame y objeto detectado
+"""
 def guardar_datos_csv(nombre_archivo, datos):
     
     # Definir los encabezados del archivo CSV
@@ -290,17 +344,14 @@ def guardar_datos_csv(nombre_archivo, datos):
     # Verificar si el archivo ya existe
     archivo_nuevo = not os.path.exists(nombre_archivo)
     
-    # Abrir el archivo en modo de escritura (append)
     with open(nombre_archivo, mode='a', newline='') as file:
         writer = csv.DictWriter(file, fieldnames=encabezados)
 
-        # Escribir los encabezados solo si el archivo es nuevo
         if archivo_nuevo:
             writer.writeheader()
 
-        # Escribir los datos en el archivo CSV
         writer.writerows(datos)
 
 
 
-video_path = "./videos_mejorados/1_enhanced.mp4"
+# video_path = "./videos_mejorados/1_enhanced.mp4"

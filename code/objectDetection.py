@@ -9,7 +9,7 @@ import os
 
 # Modelos YOLO
 modelo_personas = YOLO("yolo-Weights/yolov8n.pt")  # Modelo entrenado para personas
-modelo_manos = YOLO("./runs/detect/train4/weights/best.pt")  # Modelo entrenado para manos
+# modelo_manos = YOLO("./runs/detect/train4/weights/best.pt")  # Modelo entrenado para manos
 
 
 # Función para las bounding boxes y centroides
@@ -19,7 +19,7 @@ def procesar_detecciones(resultados, color, etiqueta, img, centroides_actuales, 
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             confianza = math.ceil((box.conf[0] * 100)) / 100
 
-            if confianza > 0.7:         # Si la confianza es mayor a 0.7
+            if confianza > 0.6:         # Si la confianza es mayor a 0.7
                 cx, cy = fe.calcular_centroide(x1, y1, x2, y2)
 
                 print(f"{etiqueta} - Centroide: ({cx}, {cy}) - Confianza: {confianza}")
@@ -29,15 +29,15 @@ def procesar_detecciones(resultados, color, etiqueta, img, centroides_actuales, 
                 bbox_actuales[key] = (x1, y1, x2, y2)
 
                 cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
-                cv2.putText(img, etiqueta, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                cv2.putText(img, confianza, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
 
 # Función principal donde se procesa el video
-def modelo(video_path): 
+def modelo(video_path, csv_path, archivo): 
     centroides_anteriores = {}
     velocidades_anteriores = {}
     datos_frame = []
-    objetos_en_area = {}  # Diccionario para contar los frames que un objeto está en un área
+    objetos_en_area = {}  # contar los frames que un objeto está en un área
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -60,11 +60,11 @@ def modelo(video_path):
 
         # Detección con ambos modelos
         resultados_personas = modelo_personas(img, stream=True)
-        resultados_manos = modelo_manos(img, stream=True)
+        #resultados_manos = modelo_manos(img, stream=True)
 
         # Dibujar boundingboxes en la imagen
         procesar_detecciones(resultados_personas, (255, 0, 0), "Persona", img, centroides_actuales, bbox_actuales)
-        procesar_detecciones(resultados_manos, (0, 255, 0), "Mano", img, centroides_actuales, bbox_actuales)
+        #procesar_detecciones(resultados_manos, (0, 255, 0), "Mano", img, centroides_actuales, bbox_actuales)
         
         # Calcular flujo óptico de los centroides
         flujos_por_bbox, _ = fe.flujoOptico(frame_anterior, frame_actual, bbox_actuales)
@@ -127,7 +127,7 @@ def modelo(video_path):
                 })
 
         # Guardar datos en CSV
-        fe.guardar_datos_csv("archivooooo.csv", datos_frame)
+        fe.guardar_datos_csv(csv_path + archivo + ".csv", datos_frame)
 
         # Mostrar frame
         cv2.imshow('Video', img)
@@ -145,8 +145,26 @@ def modelo(video_path):
     cv2.destroyAllWindows()
 
 
-# Ruta del archivo de video
-video_path = "./videos_mejorados/1_enhanced.mp4"
+# -----------------------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------------------------------
 
-# Llamar a la función principal           
-modelo(video_path)
+
+# csv_path = "./informacion/csv/sospechoso/"
+# video_path = "./videos_mejorados/"
+
+# for archivo in os.listdir(video_path):
+#     ruta_completa = os.path.join(video_path, archivo)
+
+#     if os.path.isfile(ruta_completa):
+#         print(f"Archivo encontrado: {archivo}")    
+        
+#         ruta = video_path + archivo    
+
+#         # Llamar a la función principal           
+#         modelo(ruta, csv_path, archivo)
+      
+video_path = "./videos_mejorados/1_enhanced.mp4"  
+csv_path = "./informacion/csv/sospechoso/"
+modelo(video_path, csv_path, "aaaa")
