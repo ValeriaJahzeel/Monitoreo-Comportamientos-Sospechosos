@@ -272,38 +272,32 @@ def densidadMovimiento(centroides_actuales, frame_dimensiones):
 
     return densidad
 
-def flujoOpticoDenso(frame_anterior, frame_actual):
-     if frame_anterior is None:
-        return {}, {}
-    
-    
-    prvs = cv2.cvtColor(frame_anterior,cv2.COLOR_BGR2GRAY)
-    hsv = np.zeros_like(frame_anterior)
-    hsv[...,1] = 255
-    
-    while(1):
-        ret, frame2 = cap.read()
-        next = cv2.cvtColor(frame2,cv2.COLOR_BGR2GRAY)
-        
-        flow = cv2.calcOpticalFlowFarneback(prvs,next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-        
-        mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
-        hsv[...,0] = ang*180/np.pi/2
-        hsv[...,2] = cv2.normalize(mag,None,0,255,cv2.NORM_MINMAX)
-        rgb = cv2.cvtColor(hsv,cv2.COLOR_HSV2BGR)
-        
-        cv2.imshow('frame2',rgb)
-        k = cv2.waitKey(30) &amp; 0xff
-        if k == 27:
-            break
-        elif k == ord('s'):
-            cv2.imwrite('opticalfb.png',frame2)
-            cv2.imwrite('opticalhsv.png',rgb)
-        prvs = next
-    
-    cap.release()
-    cv2.destroyAllWindows()
-    return
+"""
+Calcula el flujo óptico denso entre dos frames consecutivos.
+"""
+def calcular_flujo_optico_denso(frame_anterior, frame_actual):
+
+    # Calcula el flujo óptico denso usando el método de Farneback
+    flujo = cv2.calcOpticalFlowFarneback(frame_anterior, frame_actual, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+    return flujo
+
+"""
+Visualiza el flujo óptico denso en el frame.
+"""
+def visualizar_flujo_denso(frame, flujo, paso=16, escala=3):
+
+    h, w = frame.shape[:2]
+    y, x = np.mgrid[0:h:paso, 0:w:paso].reshape(2, -1).astype(int)
+    fx, fy = flujo[y, x].T
+
+    # Dibuja las flechas del flujo óptico
+    lineas = np.vstack([x, y, x + fx * escala, y + fy * escala]).T.reshape(-1, 2, 2)
+    lineas = np.int32(lineas + 0.5)
+
+    for (x1, y1), (x2, y2) in lineas:
+        cv2.arrowedLine(frame, (x1, y1), (x2, y2), (0, 255, 0), 1, tipLength=0.3)
+
+    return frame
     
     
 def permanenciaArea(objetos_en_area, fps):

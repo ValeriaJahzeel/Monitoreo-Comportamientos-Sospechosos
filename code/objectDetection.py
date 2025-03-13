@@ -6,11 +6,10 @@ import featureExtraction as fe  # Importar el módulo featureExtraction para las
 import numpy as np            
 import csv
 import os
+from optical_flow import calcular_flujo_optico_denso, visualizar_flujo_denso  # Importar las funciones de flujo óptico denso
 
 # Modelos YOLO
 modelo_personas = YOLO("yolo-Weights/yolov8n.pt")  # Modelo entrenado para personas
-# modelo_manos = YOLO("./runs/detect/train4/weights/best.pt")  # Modelo entrenado para manos
-
 
 # Función para las bounding boxes y centroides
 def procesar_detecciones(resultados, color, etiqueta, img, centroides_actuales, bbox_actuales):
@@ -29,8 +28,7 @@ def procesar_detecciones(resultados, color, etiqueta, img, centroides_actuales, 
                 bbox_actuales[key] = (x1, y1, x2, y2)
 
                 cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
-                cv2.putText(img, confianza, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-
+                cv2.putText(img, f"{confianza:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
 # Función principal donde se procesa el video
 def modelo(video_path, csv_path, archivo): 
@@ -60,15 +58,13 @@ def modelo(video_path, csv_path, archivo):
 
         # Detección con ambos modelos
         resultados_personas = modelo_personas(img, stream=True)
-        #resultados_manos = modelo_manos(img, stream=True)
 
         # Dibujar boundingboxes en la imagen
         procesar_detecciones(resultados_personas, (255, 0, 0), "Persona", img, centroides_actuales, bbox_actuales)
-        #procesar_detecciones(resultados_manos, (0, 255, 0), "Mano", img, centroides_actuales, bbox_actuales)
         
-        # Calcular flujo óptico de los centroides
-        flujos_por_bbox, _ = fe.flujoOptico(frame_anterior, frame_actual, bbox_actuales)
-        img = fe.visualizar_flujo(img, flujos_por_bbox, bbox_actuales)
+        # Calcular flujo óptico denso
+        flujo = calcular_flujo_optico_denso(frame_anterior, frame_actual)
+        img = visualizar_flujo_denso(img, flujo)
 
         frame_dimensiones = img.shape[:2]
 
@@ -144,27 +140,7 @@ def modelo(video_path, csv_path, archivo):
     cap.release()
     cv2.destroyAllWindows()
 
-
-# -----------------------------------------------------------------------------------------------------------------------------------
-# -----------------------------------------------------------------------------------------------------------------------------------
-# -----------------------------------------------------------------------------------------------------------------------------------
-# -----------------------------------------------------------------------------------------------------------------------------------
-
-
-# csv_path = "./informacion/csv/sospechoso/"
-# video_path = "./videos_mejorados/"
-
-# for archivo in os.listdir(video_path):
-#     ruta_completa = os.path.join(video_path, archivo)
-
-#     if os.path.isfile(ruta_completa):
-#         print(f"Archivo encontrado: {archivo}")    
-        
-#         ruta = video_path + archivo    
-
-#         # Llamar a la función principal           
-#         modelo(ruta, csv_path, archivo)
-      
+# Ejecución del modelo
 video_path = "./videos_mejorados/1_enhanced.mp4"  
 csv_path = "./informacion/csv/sospechoso/"
 modelo(video_path, csv_path, "aaaa")
