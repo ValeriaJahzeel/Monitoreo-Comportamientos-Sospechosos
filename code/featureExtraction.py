@@ -39,9 +39,12 @@ class FeatureExtractor:
             
             self.trayectorias[key].append(centroides[key])
         
-        # Guardar para el siguiente frame
-        resultado = centroides
-        self.centroides_anteriores = centroides
+        # Guardar para el siguiente frame (no sobreescribir resultado)
+        resultado = centroides.copy()  # Usar copy para evitar referencias cruzadas
+        
+        # Actualizar centroides anteriores para el próximo frame
+        self.centroides_anteriores = self.centroides_anteriores.copy()  # Preservar los anteriores
+        
         return resultado
     
     def calcular_metricas_movimiento(self, centroides, fps=25):
@@ -242,9 +245,7 @@ class FeatureExtractor:
                             )
             
             return cv2.addWeighted(img, 1, mask, 1, 0)
-    
-    # ----- NUEVAS FUNCIONES DE EXTRACCIÓN DE CARACTERÍSTICAS -----
-    
+        
     def analizar_trayectoria(self, objeto_id):
         """
         Analiza la trayectoria de un objeto y detecta patrones de movimiento
@@ -419,10 +420,18 @@ class FeatureExtractor:
         """
         Recolecta todas las características para el frame actual y objetos detectados
         """
-        # Calcular centroides
-        centroides = self.actualizar_centroides(bboxes)
+        # Calcular centroides para este frame
+        centroides = {}
+        for key, bbox in bboxes.items():
+            centroides[key] = self.calcular_centroide(bbox)
+            
+            # Inicializar o actualizar historial de trayectoria
+            if key not in self.trayectorias:
+                self.trayectorias[key] = deque(maxlen=self.history_size)
+            
+            self.trayectorias[key].append(centroides[key])
         
-        # Calcular métricas básicas de movimiento
+        # Calcular métricas básicas de movimiento con los centroides actuales y anteriores
         metricas = self.calcular_metricas_movimiento(centroides, fps)
         
         # Calcular posturas
@@ -468,7 +477,10 @@ class FeatureExtractor:
             }
             
             datos_frame.append(datos_obj)
-            
+        
+        # Actualizar centroides anteriores DESPUÉS de calcular las métricas
+        self.centroides_anteriores = centroides.copy()
+        
         return datos_frame
     
     def guardar_datos_csv(self, nombre_archivo, datos):

@@ -15,3 +15,7 @@ informacion/
 people/
 people_dataset/
 annotations/
+runs.zip
+dataset/
+datasetCSV/
+resultados/
