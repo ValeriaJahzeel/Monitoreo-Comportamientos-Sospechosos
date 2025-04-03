@@ -17,5 +17,6 @@ people_dataset/
 annotations/
 runs.zip
 dataset/
+dataset\
 datasetCSV/
 resultados/
