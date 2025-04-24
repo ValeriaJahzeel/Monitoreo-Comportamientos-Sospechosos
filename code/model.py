@@ -560,9 +560,9 @@ def train_video_classifier(csv_dir,
             logger.info(f"No hay mejora en el rendimiento. Counter: {early_stopping_counter}/{patience}")
         
         # Early stopping
-        # if early_stopping_counter >= patience:
-        #     logger.info(f"Early stopping después de {epoch+1} épocas")
-        #     break
+        if early_stopping_counter >= patience:
+            logger.info(f"Early stopping después de {epoch+1} épocas")
+            break
     
     total_time = time.time() - start_time
     logger.info(f"Entrenamiento completado en {total_time/60:.2f} minutos")
@@ -916,7 +916,7 @@ def ensemble_prediction(models, video_path, selected_features=None, max_frames=N
 
 if __name__ == '__main__':
     # Directorio con archivos CSV de videos
-    csv_directory = 'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\datasetCSV'
+    csv_directory = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\nuevoDatasetCSV'
     
     # Verificar que el directorio existe
     if not os.path.exists(csv_directory):
@@ -948,11 +948,22 @@ if __name__ == '__main__':
                 learning_rate=0.001,
                 batch_size=32,
                 dropout_rate=0.3,
-                epochs=100,
+                epochs=50,
                 patience=15,
                 max_frames=10000
             )
         else:
+            # train_video_classifier(
+            #     csv_dir=csv_directory,
+            #     model_type='mlp',
+            #     hidden_layers=[256, 128, 64],  # Arquitectura modificada
+            #     learning_rate=0.0005,  # Tasa de aprendizaje modificada
+            #     batch_size=16,  # Tamaño de lote modificado
+            #     dropout_rate=0.4,  # Dropout modificado
+            #     epochs=150,  # Más épocas
+            #     patience=20,  # Más paciencia
+            #     weight_decay=1e-4  # Regularización modificada
+            # )
             train_video_classifier(
                 csv_dir=csv_directory,
                 model_type='mlp',
