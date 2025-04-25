@@ -1,6 +1,6 @@
 import code.otros.getKeypoints as gk
 import code.otros.getFrame as gf
-import preprocesamientoVideo as pv
+import code.preprocesamientoDatos.preprocesamientoVideo as pv
 
 video = "./dataset/sospechoso/"
 frames = './informacion//frames/sospechoso/'
