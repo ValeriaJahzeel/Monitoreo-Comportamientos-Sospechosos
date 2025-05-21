@@ -678,3 +678,10 @@ if __name__ == "__main__":
         directorio_salida=args.output_dir,
         target_column=args.target
     )
+    
+    
+explorador = FeatureExplorer(
+    csv_directory="./informacion/csv",
+    output_directory="./analisis_inicial"
+)
+explorador.generar_informe_completo(target_column="Patron_Movimiento")

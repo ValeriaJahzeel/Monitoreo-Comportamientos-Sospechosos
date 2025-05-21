@@ -2,8 +2,8 @@ import cv2
 import os
 
 # Rutas
-input_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\dataset\normal'
-output_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\dataset\normal_reducido'
+input_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\dataset\sospechoso\merodeo'
+output_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\dataset\sospechoso\merodeo_redimensionados'
 
 # Crear el directorio de salida si no existe
 os.makedirs(output_path, exist_ok=True)

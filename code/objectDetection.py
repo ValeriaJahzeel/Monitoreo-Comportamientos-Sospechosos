@@ -511,9 +511,9 @@ if __name__ == "__main__":
     # varios videos
     
     import glob
-    videos = glob.glob("./dataset/sospechoso/*.mp4")
+    videos = glob.glob("./dataset/normal/*.mp4")
     for video in videos:
         nombre = os.path.basename(video).split('.')[0]
-        csv_path = f"./informacion/csv/sospechoso/{nombre}.csv"
+        csv_path = f"./informacion/csv/normal/{nombre}.csv"
         detector.procesar_video(video, csv_path)
     

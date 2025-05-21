@@ -22,3 +22,8 @@ datasetCSV/
 resultados/
 nuevoDatasetCSV/
 datasetCSV_procesado/
+comportamientos_env/
+code/entrenamiento/resultados/
+csv/
+code/analisis/
+analisis_exploratorio/

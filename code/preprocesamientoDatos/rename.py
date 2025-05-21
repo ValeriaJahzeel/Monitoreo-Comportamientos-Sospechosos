@@ -6,7 +6,7 @@ import cv2
 import os
 
 # Rutas
-input_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\informacion\csv\normal'
+input_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\informacion\csv\sospechoso\forcejeo'
 output_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\datasetCSV'
 
 # Crear el directorio de salida si no existe
@@ -19,7 +19,7 @@ with os.scandir(input_path) as archivos:
             
             # Ruta completa del archivo de entrada y salida
             input_file = os.path.join(input_path, archivo.name)
-            new_filename = f"normal_{archivo.name}"
+            new_filename = f"forcejeo_{archivo.name}"
             output_file = os.path.join(output_path, new_filename)
             
             # Renombrar y mover el archivo
