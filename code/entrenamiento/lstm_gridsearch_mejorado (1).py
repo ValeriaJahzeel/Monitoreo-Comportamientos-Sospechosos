@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 import tensorflow as tf
 from sklearn.utils.class_weight import compute_class_weight
+from sklearn.model_selection import GroupShuffleSplit
 
 from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Bidirectional
 from tensorflow.keras.models import Sequential
@@ -63,8 +64,10 @@ class SimpleVideoLSTMTrainer:
             
             # Características básicas más importantes para LSTM
             feature_cols = [
-                'Area_Trayectoria', 'Densidad', 'Linealidad', 'Circularidad', 'Zigzag', 'Frame', 'Centroide_Y', 'Centroide_X'
+                'Velocidad', 'Aceleracion', 'Cambio_Direccion', 'Linealidad', 'Circularidad',
+                'Zigzag', 'Densidad', 'Area_Trayectoria', 'Centroide_X', 'Centroide_Y'
             ]
+
             
             # Verificar qué columnas existen
             available_cols = [col for col in feature_cols if col in df.columns]
@@ -239,55 +242,40 @@ class SimpleVideoLSTMTrainer:
         
         return self.sequences, self.labels, self.video_names
     
+
     def prepare_data_for_lstm(self, test_size=0.2):
         """
-        Prepara datos para entrenamiento LSTM.
+        Prepara datos para entrenamiento LSTM con separación por video completo.
         """
-        print(f"\n🔄 Preparando datos para LSTM...")
-        
-        # Codificar labels
+        print(f"\n🔄 Preparando datos para LSTM (con separación por video)...")
+
         y_encoded = self.label_encoder.fit_transform(self.labels)
         n_classes = len(self.label_encoder.classes_)
-        
         print(f"   Clases: {dict(zip(self.label_encoder.classes_, range(n_classes)))}")
-        
-        # División estratificada
-        try:
-            X_train, X_test, y_train, y_test = train_test_split(
-                self.sequences, y_encoded, test_size=test_size,
-                stratify=y_encoded, random_state=self.random_state
-            )
-            print(f"   ✅ División estratificada")
-        except:
-            X_train, X_test, y_train, y_test = train_test_split(
-                self.sequences, y_encoded, test_size=test_size,
-                random_state=self.random_state
-            )
-            print(f"   ⚠️ División simple")
-        
-        print(f"   Train: {len(X_train)} | Test: {len(X_test)}")
-        
-        # Normalizar características
-        # Reshape para scaler (samples * timesteps, features)
+
+        # Separación por video completo usando GroupShuffleSplit
+        gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=self.random_state)
+        train_idx, test_idx = next(gss.split(self.sequences, y_encoded, groups=self.video_names))
+
+        X_train, X_test = self.sequences[train_idx], self.sequences[test_idx]
+        y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
+
+        print(f"   ✅ División por video (sin fuga de datos)")
+        print(f"   Train videos: {len(X_train)} | Test videos: {len(X_test)}")
+
+        # Normalización
         n_samples_train, n_timesteps, n_features = X_train.shape
         X_train_reshaped = X_train.reshape(-1, n_features)
-        
-        # Ajustar scaler solo con datos de entrenamiento
         self.scaler.fit(X_train_reshaped)
-        
-        # Transformar datos de entrenamiento
         X_train_scaled = self.scaler.transform(X_train_reshaped).reshape(n_samples_train, n_timesteps, n_features)
-        
-        # Transformar datos de test
+
         n_samples_test = X_test.shape[0]
         X_test_reshaped = X_test.reshape(-1, n_features)
         X_test_scaled = self.scaler.transform(X_test_reshaped).reshape(n_samples_test, n_timesteps, n_features)
-        
-        # Convertir labels a categorical
+
         y_train_cat = to_categorical(y_train, n_classes)
         y_test_cat = to_categorical(y_test, n_classes)
-        
-        # Guardar datos
+
         self.X_train = X_train_scaled
         self.y_train = y_train
         self.y_train_cat = y_train_cat
@@ -295,13 +283,12 @@ class SimpleVideoLSTMTrainer:
         self.y_test = y_test
         self.y_test_cat = y_test_cat
         self.n_classes = n_classes
-        
+
         print(f"   Forma X_train: {X_train_scaled.shape}")
         print(f"   Forma y_train: {y_train_cat.shape}")
-        
+
         return X_train_scaled, y_train_cat, X_test_scaled, y_test_cat
-    
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Bidirectional
+
 
     def create_simple_lstm_model(self):
         """
@@ -398,6 +385,75 @@ class SimpleVideoLSTMTrainer:
         self.results['training_history'] = history.history
         print(f"   ✅ Entrenamiento completado")
         return history
+    
+    def train_lstm_from_config(self, cfg, epochs=150, validation_split=0.2):
+        """
+        Entrena el modelo LSTM usando un diccionario de hiperparámetros (cfg)
+        tal como viene de grid_search_lstm.
+        """
+        print("\n🏗️  Re-entrenando con la MEJOR configuración de Grid Search…")
+        print(f"   Config: {cfg}")
+
+        n_timesteps, n_features = self.X_train.shape[1], self.X_train.shape[2]
+
+        model = Sequential()
+        model.add(Bidirectional(
+            LSTM(cfg['lstm_units_1'],
+                return_sequences=cfg['n_lstm_layers'] > 1,
+                dropout=cfg['dropout'],
+                recurrent_dropout=cfg['dropout']),
+            input_shape=(n_timesteps, n_features)))
+        model.add(BatchNormalization())
+
+        if cfg['n_lstm_layers'] > 1:
+            model.add(Bidirectional(
+                LSTM(cfg.get('lstm_units_2', 32),
+                    return_sequences=False,
+                    dropout=cfg['dropout'],
+                    recurrent_dropout=cfg['dropout'])))
+            model.add(BatchNormalization())
+
+        for units in cfg['dense_units']:
+            model.add(Dense(units, activation='relu'))
+            model.add(Dropout(cfg['dropout']))
+
+        model.add(Dense(self.n_classes, activation='softmax'))
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=cfg['learning_rate']),
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+
+        self.model = model
+        print(model.summary())
+
+        # Pesos por clase
+        cw = compute_class_weight('balanced',
+                                classes=np.unique(self.y_train),
+                                y=self.y_train)
+        cw_dict = dict(enumerate(cw))
+
+        cb = [
+            EarlyStopping(monitor='val_loss', patience=20,
+                        restore_best_weights=True, verbose=1),
+            ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                            patience=10, min_lr=1e-6, verbose=1)
+        ]
+
+        history = self.model.fit(
+            self.X_train, self.y_train_cat,
+            epochs=epochs,
+            batch_size=cfg['batch_size'],
+            validation_split=validation_split,
+            callbacks=cb,
+            class_weight=cw_dict,
+            verbose=1
+        )
+
+        self.results['training_history'] = history.history
+        print("✅ Re-entrenamiento completado")
+        return history
+
     
     def evaluate_final(self):
         """
@@ -563,74 +619,61 @@ def plot_test_results(y_test, y_pred, y_prob, label_encoder):
 
 
 def main():
-    """
-    Función principal para entrenamiento LSTM.
-    """
     print("🔄 ENTRENADOR LSTM SIMPLE PARA VIDEOS")
     print("=" * 50)
-    
-    data_dir = input("📁 Directorio con carpetas de clases: ").strip()
+
+    # data_dir = input("📁 Directorio con carpetas de clases: ").strip()
+    data_dir = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\csv'
     if not data_dir or not Path(data_dir).exists():
-        print("❌ Directorio no válido")
-        return
-    
-    try:
-        # Crear entrenador
-        trainer = SimpleVideoLSTMTrainer(random_state=42)
-        
-        # Cargar secuencias
-        sequences, labels, names = trainer.load_videos_as_sequences(data_dir, max_sequence_length=50)
-        
-        # Preparar datos
-        X_train, y_train, X_test, y_test = trainer.prepare_data_for_lstm(test_size=0.2)
-        
-        # Entrenar modelo
+        print("❌ Directorio no válido"); return
+
+    trainer = SimpleVideoLSTMTrainer(random_state=42)
+
+    # 1. Cargar y preparar
+    trainer.load_videos_as_sequences(data_dir, max_sequence_length=50)
+    trainer.prepare_data_for_lstm(test_size=0.2)
+
+    # 2. ¿Grid Search?
+    ejecutar_grid = input("⚙️ ¿Ejecutar Grid Search de hiperparámetros? [s/N]: ").strip().lower()
+
+    if ejecutar_grid == 's':
+        print("\n🚀 Ejecutando SOLO Grid Search (no habrá entrenamiento por defecto)…")
+
+        param_grid = {
+            'lstm_units_1': [32, 64],
+            'n_lstm_layers': [1],
+            'dense_units': [(64,), (64, 32)],
+            'dropout': [0.2, 0.3],
+            'learning_rate': [0.0005],
+            'batch_size': [4]
+        }
+
+        top_results = grid_search_lstm(
+            trainer,
+            param_grid,
+            epochs=150,
+            validation_split=0.2
+        )
+
+        # 2.1 Elegir la mejor config (top_results[0])
+        best_cfg = top_results[0]['config']
+        print(f"\n✨ Mejor configuración encontrada: {best_cfg}")
+
+        # 2.2 Re-entrenar con la mejor config y guardar historia para gráficas
+        history = trainer.train_lstm_from_config(best_cfg, epochs=150, validation_split=0.2)
+
+    else:
+        print("\n🚀 Entrenamiento con hiperparámetros por defecto…")
         history = trainer.train_lstm(epochs=100, validation_split=0.2)
-        
-        # Evaluar
-        accuracy, f1 = trainer.evaluate_final()
-        
-        # Visualizar resultados
-        trainer.plot_results()
-        # Visualización de resultados de test
-        plot_test_results(trainer.y_test, trainer.results['predictions'], trainer.results['prediction_probabilities'], trainer.label_encoder)
-        
-        
 
-        # === OPCIONAL: Ejecutar Grid Search ===
-        ejecutar_grid = input("⚙️ ¿Ejecutar Grid Search de hiperparámetros? [s/N]: ").strip().lower()
-        if ejecutar_grid == 's':
-            param_grid = {
-                'lstm_units_1': [32, 64],
-                'lstm_units_2': [16, 32],
-                'n_lstm_layers': [1, 2],
-                'dropout': [0.2, 0.3],
-                'dense_units': [(32,), (64,), (64, 32)],
-                'learning_rate': [0.001, 0.0005],
-                'batch_size': [4, 8]
-            }
-            grid_search_lstm(trainer, param_grid, epochs=150, validation_split=0.2)
+    # 3. Evaluar y graficar
+    trainer.evaluate_final()
+    trainer.plot_results()
+    plot_test_results(trainer.y_test,
+                      trainer.results['predictions'],
+                      trainer.results['prediction_probabilities'],
+                      trainer.label_encoder)
 
-
-        # Guardar modelo
-        save_model = input("\n💾 ¿Guardar modelo? [S/n]: ").strip().lower()
-        if save_model != 'n':
-            model_name = input("📝 Nombre del modelo [lstm_video_model.h5]: ").strip()
-            if not model_name:
-                model_name = "lstm_video_model.h5"
-            trainer.save_model(model_name)
-        
-        print(f"\n🎉 ENTRENAMIENTO LSTM COMPLETADO!")
-        print(f"   Videos procesados: {len(sequences)}")
-        print(f"   Videos entrenamiento: {len(X_train)}")
-        print(f"   Videos test: {len(X_test)}")
-        print(f"   Accuracy final: {accuracy:.4f}")
-        print(f"   F1-Score final: {f1:.4f}")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
 
 class SimpleLSTMPredictor:
     """
@@ -764,8 +807,13 @@ def grid_search_lstm(trainer, param_grid, epochs=150, validation_split=0.2):
             'accuracy': acc,
             'f1_score': f1
         })
+        print(f"✔️  Finalizado modelo {i+1}/{len(combinations)} "
+        f"→ Acc={acc:.3f} | F1={f1:.3f}")
+
 
         print(f"✅ Accuracy: {acc:.4f}, F1: {f1:.4f}")
+    
+    print("\n🔚 Grid Search terminado.")
 
     # Mostrar top resultados
     top_results = sorted(results, key=lambda x: x['f1_score'], reverse=True)[:3]
