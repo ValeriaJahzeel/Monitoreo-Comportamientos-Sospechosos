@@ -1,442 +1,977 @@
 """
-Módulo para el procesamiento de datos de comportamientos.
-Este script prepara los datos de los CSV de características para el entrenamiento
-y prueba de modelos de clasificación.
+Procesador de datos mejorado que integra limpieza automática y soporte para datos originales.
+Incluye tanto datos sin procesar como datos agregados por video, objeto y frame.
+Versión corregida con mejor manejo de errores y robustez.
 """
 import os
 import glob
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from collections import Counter
+import warnings
+import json
+from pathlib import Path
+warnings.filterwarnings('ignore')
 
-class DataProcessor:
-    def __init__(self, data_dir='./informacion/csv/', output_dir='./processed_data/'):
+class EnhancedDataProcessor:
+    def __init__(self, clean_data_dir='./cleaned_data/', output_dir='./processed_data/', 
+                 use_original_data=True, use_aggregated_data=True):
         """
-        Inicializa el procesador de datos.
+        Inicializa el procesador mejorado.
         
         Parámetros:
         -----------
-        data_dir : str
-            Directorio donde se encuentran los CSV de características
+        clean_data_dir : str
+            Directorio con datos ya limpiados
         output_dir : str
-            Directorio donde se guardarán los datos procesados
+            Directorio de salida para datos procesados
+        use_original_data : bool
+            Si procesar datos originales (sin agregación)
+        use_aggregated_data : bool  
+            Si crear datos agregados (video, objeto, frame)
         """
-        self.data_dir = data_dir
-        self.output_dir = output_dir
-        self.classes = ['normal', 'merodeo', 'forcejeo']
+        self.clean_data_dir = Path(clean_data_dir)
+        self.output_dir = Path(output_dir)
+        self.use_original_data = use_original_data
+        self.use_aggregated_data = use_aggregated_data
+        
+        self.classes = ['normal', 'forcejeo', 'merodeo', 'sospechoso']
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
         
-        # Crear directorio de salida si no existe
-        os.makedirs(output_dir, exist_ok=True)
+        # Inicializar atributos
+        self.combined_data = None
+        self.video_info = None
         
-    def load_data(self):
+        # Crear directorios
+        self._create_directories()
+        
+        print(f"🔧 Procesador mejorado inicializado:")
+        print(f"   Datos limpios: {self.clean_data_dir}")
+        print(f"   Salida: {self.output_dir}")
+        print(f"   Datos originales: {'✅' if use_original_data else '❌'}")
+        print(f"   Datos agregados: {'✅' if use_aggregated_data else '❌'}")
+    
+    def _create_directories(self):
+        """Crea directorios necesarios."""
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            if self.use_aggregated_data:
+                (self.output_dir / 'lstm_data').mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"⚠️ Error creando directorios: {e}")
+            raise
+    
+    def load_cleaned_data(self):
         """
-        Carga los datos de todos los CSV disponibles en las carpetas de clases.
+        Carga todos los datos ya limpiados automáticamente.
         """
-        print("Cargando datos...")
+        print("\n" + "="*60)
+        print("CARGANDO DATOS LIMPIADOS AUTOMÁTICAMENTE")
+        print("="*60)
+        
+        # Primero intentar cargar archivo combinado
+        combined_file = self.clean_data_dir / 'all_data_cleaned.csv'
+        
+        if combined_file.exists():
+            print("✅ Cargando archivo de datos combinados limpiados...")
+            try:
+                combined_data = pd.read_csv(combined_file)
+                video_info = self._extract_video_info(combined_data)
+            except Exception as e:
+                print(f"❌ Error cargando archivo combinado: {e}")
+                return self._load_individual_files()
+        else:
+            return self._load_individual_files()
+        
+        # Validar datos cargados
+        if combined_data.empty:
+            raise ValueError("Los datos cargados están vacíos")
+        
+        # Procesar datos
+        combined_data, video_info = self._process_loaded_data(combined_data, video_info)
+        
+        return combined_data, video_info
+    
+    def _load_individual_files(self):
+        """Carga archivos individuales por clase."""
+        print("📂 Cargando datos limpiados por clase...")
         all_data = []
+        video_info = []
         
         for class_name in self.classes:
-            class_dir = os.path.join(self.data_dir, class_name)
-            if not os.path.exists(class_dir):
-                print(f"Advertencia: La carpeta {class_dir} no existe. Saltando...")
+            class_dir = self.clean_data_dir / class_name
+            
+            if not class_dir.exists():
+                print(f"⚠️ Carpeta {class_dir} no encontrada")
                 continue
-                
-            csv_files = glob.glob(os.path.join(class_dir, "*.csv"))
-            print(f"Encontrados {len(csv_files)} archivos CSV para la clase '{class_name}'")
+            
+            csv_files = list(class_dir.glob("clean_*.csv"))
+            
+            if not csv_files:
+                print(f"⚠️ No se encontraron archivos limpios en {class_dir}")
+                continue
+            
+            print(f"📁 Clase '{class_name}': {len(csv_files)} archivos limpios")
             
             for csv_file in csv_files:
-                video_name = os.path.basename(csv_file).split('.')[0]
                 try:
-                    # Cargar CSV
+                    video_name = csv_file.stem.replace('clean_', '')
                     df = pd.read_csv(csv_file)
                     
-                    # Añadir información de clase y video
-                    df['clase'] = class_name
-                    df['video_id'] = video_name
+                    # Validar archivo
+                    if df.empty:
+                        print(f"  ⚠️ {video_name}: Archivo vacío")
+                        continue
+                    
+                    # Asegurar columnas necesarias
+                    df = self._ensure_required_columns(df, class_name, video_name)
                     
                     all_data.append(df)
-                    print(f"  ✓ Cargado {video_name}: {len(df)} registros")
+                    
+                    # Información del video
+                    video_info.append(self._extract_single_video_info(df, video_name, class_name))
+                    
+                    print(f"  ✅ {video_name}: {len(df)} registros")
+                    
                 except Exception as e:
-                    print(f"  ✗ Error al cargar {csv_file}: {str(e)}")
+                    print(f"  ❌ Error en {csv_file}: {str(e)}")
         
         if not all_data:
-            raise ValueError("No se pudieron cargar datos de ningún archivo CSV")
-            
-        # Combinar todos los DataFrames
-        self.data = pd.concat(all_data, ignore_index=True)
-        print(f"Datos combinados: {len(self.data)} registros totales")
+            raise ValueError("No se pudieron cargar datos limpios")
         
-        return self.data
+        combined_data = pd.concat(all_data, ignore_index=True)
+        video_info_df = pd.DataFrame(video_info)
+        
+        return self._process_loaded_data(combined_data, video_info_df)
     
-    def clean_data(self):
-        """
-        Limpia y preprocesa los datos cargados.
-        """
-        print("Limpiando datos...")
+    def _ensure_required_columns(self, df, class_name, video_name):
+        """Asegura que el DataFrame tenga las columnas necesarias."""
+        if 'clase' not in df.columns:
+            df['clase'] = class_name
+        if 'video_id' not in df.columns:
+            df['video_id'] = video_name
+        return df
+    
+    def _extract_video_info(self, combined_data):
+        """Extrae información de videos desde datos combinados."""
+        video_info = []
+        for video_id in combined_data['video_id'].unique():
+            video_data = combined_data[combined_data['video_id'] == video_id]
+            video_info.append(self._extract_single_video_info(video_data, video_id))
         
-        # Verificar si hay datos cargados
-        if not hasattr(self, 'data') or self.data is None:
-            raise ValueError("No hay datos cargados. Ejecute load_data() primero.")
+        return pd.DataFrame(video_info)
+    
+    def _extract_single_video_info(self, video_data, video_id, class_name=None):
+        """Extrae información de un solo video."""
+        if class_name is None:
+            class_name = video_data['clase'].iloc[0] if 'clase' in video_data.columns else 'unknown'
         
-        # Eliminar duplicados
-        self.data = self.data.drop_duplicates()
+        # Calcular métricas de manera segura
+        n_frames = video_data['Frame'].nunique() if 'Frame' in video_data.columns else len(video_data)
+        n_objetos = video_data['Objeto'].nunique() if 'Objeto' in video_data.columns else 1
         
-        # Reemplazar valores infinitos o NaN
-        self.data.replace([np.inf, -np.inf], np.nan, inplace=True)
+        if 'Frame' in video_data.columns and not video_data['Frame'].empty:
+            duracion_aprox = video_data['Frame'].max() - video_data['Frame'].min() + 1
+        else:
+            duracion_aprox = 1
         
-        # Imputar valores faltantes
-        numeric_cols = self.data.select_dtypes(include=['float64', 'int64']).columns
-        categorical_cols = self.data.select_dtypes(include=['object']).columns
+        return {
+            'video_id': video_id,
+            'clase': class_name,
+            'n_frames': n_frames,
+            'n_objetos': n_objetos,
+            'n_registros': len(video_data),
+            'duracion_aprox': duracion_aprox
+        }
+    
+    def _process_loaded_data(self, combined_data, video_info):
+        """Procesa los datos cargados (normalización, encoding, etc.)."""
+        # Normalizar nombres de clases
+        class_mapping = {'sospechoso': 'merodeo'}
+        combined_data['clase'] = combined_data['clase'].replace(class_mapping)
+        video_info['clase'] = video_info['clase'].replace(class_mapping)
         
-        for col in numeric_cols:
-            self.data[col].fillna(self.data[col].median(), inplace=True)
+        # Validar que tenemos clases
+        unique_classes = combined_data['clase'].unique()
+        if len(unique_classes) == 0:
+            raise ValueError("No se encontraron clases en los datos")
+        
+        # Codificar clases
+        self.label_encoder.fit(unique_classes)
+        combined_data['clase_encoded'] = self.label_encoder.transform(combined_data['clase'])
+        video_info['clase_encoded'] = self.label_encoder.transform(video_info['clase'])
+        
+        # Almacenar en atributos de clase
+        self.combined_data = combined_data
+        self.video_info = video_info
+        
+        # Mostrar estadísticas
+        self._print_data_statistics()
+        
+        return combined_data, video_info
+    
+    def _print_data_statistics(self):
+        """Imprime estadísticas de los datos cargados."""
+        print(f"\n📊 ESTADÍSTICAS DE DATOS CARGADOS (YA LIMPIADOS):")
+        print(f"  Total de registros: {len(self.combined_data):,}")
+        print(f"  Total de videos: {len(self.video_info)}")
+        
+        # Distribución por clase
+        print(f"\n📈 Distribución por clase:")
+        class_dist = self.video_info['clase'].value_counts()
+        for clase, count in class_dist.items():
+            percentage = (count / len(self.video_info)) * 100
+            print(f"  {clase}: {count} videos ({percentage:.1f}%)")
+        
+        # Verificar calidad de datos limpios
+        numeric_cols = self.combined_data.select_dtypes(include=[np.number]).columns
+        
+        if len(numeric_cols) > 0:
+            # Verificar NaN e infinitos
+            nan_count = self.combined_data[numeric_cols].isnull().sum().sum()
+            inf_count = np.isinf(self.combined_data[numeric_cols].select_dtypes(include=[np.number])).sum().sum()
             
-        for col in categorical_cols:
-            if col not in ['clase', 'video_id', 'Objeto']:  # No imputar estas columnas
-                if not self.data[col].mode().empty:
-                    self.data[col].fillna(self.data[col].mode()[0], inplace=True)
+            print(f"\n✅ CALIDAD DE DATOS LIMPIOS:")
+            print(f"  NaN encontrados: {nan_count} {'✅' if nan_count == 0 else '⚠️'}")
+            print(f"  Infinitos encontrados: {inf_count} {'✅' if inf_count == 0 else '⚠️'}")
+            
+            if nan_count > 0 or inf_count > 0:
+                print("⚠️ Los datos requieren limpieza adicional")
+            else:
+                print("✅ Datos perfectamente limpios y listos para ML")
+        else:
+            print("⚠️ No se encontraron columnas numéricas")
+    
+    def process_original_data(self):
+        """
+        Procesa datos originales sin agregación.
+        Mantiene la granularidad máxima de los datos.
+        """
+        if not self.use_original_data:
+            print("⚠️ Procesamiento de datos originales deshabilitado")
+            return None, None
+        
+        print(f"\n📊 PROCESANDO DATOS ORIGINALES (SIN AGREGACIÓN)...")
+        
+        if self.combined_data is None:
+            raise ValueError("Datos no cargados. Ejecute load_cleaned_data() primero.")
+        
+        # Usar directamente los datos combinados limpios
+        original_data = self.combined_data.copy()
+        
+        # Identificar características numéricas
+        exclude_cols = ['video_id', 'clase', 'clase_encoded']
+        numeric_cols = original_data.select_dtypes(include=[np.number]).columns
+        feature_cols = [col for col in numeric_cols if col not in exclude_cols]
+        
+        if len(feature_cols) == 0:
+            print("⚠️ No se encontraron características numéricas")
+            return original_data, []
+        
+        print(f"  ✅ Datos originales preparados:")
+        print(f"     Registros: {len(original_data)}")
+        print(f"     Características: {len(feature_cols)}")
+        print(f"     Características incluidas: {feature_cols[:10]}...")
+        
+        return original_data, feature_cols
+    
+    def create_features_by_level(self):
+        """
+        Crea características agregadas por video, objeto y frame.
+        """
+        if not self.use_aggregated_data:
+            print("⚠️ Datos agregados deshabilitados")
+            return None, None, None
+        
+        if self.combined_data is None:
+            raise ValueError("Datos no cargados. Ejecute load_cleaned_data() primero.")
+        
+        print(f"\n🔧 CREANDO CARACTERÍSTICAS AGREGADAS...")
+        
+        # Características base para agregación
+        numeric_features = self._get_numeric_features_for_aggregation()
+        
+        if len(numeric_features) == 0:
+            print("⚠️ No hay características numéricas para agregación")
+            return None, None, None
+        
+        print(f"  Características disponibles para agregación: {len(numeric_features)}")
+        
+        # 1. NIVEL VIDEO
+        video_features = self._create_video_features(numeric_features)
+        
+        # 2. NIVEL OBJETO
+        object_features = self._create_object_features(numeric_features)
+        
+        # 3. NIVEL FRAME
+        frame_features = self._create_frame_features(numeric_features)
+        
+        print(f"  ✅ Características agregadas creadas:")
+        print(f"    Video: {len(video_features) if video_features is not None else 0} filas")
+        print(f"    Objeto: {len(object_features) if object_features is not None else 0} filas")
+        print(f"    Frame: {len(frame_features) if frame_features is not None else 0} filas")
+        
+        return video_features, object_features, frame_features
+    
+    def _get_numeric_features_for_aggregation(self):
+        """Obtiene características numéricas válidas para agregación."""
+        numeric_features = []
+        exclude_cols = ['Frame', 'Objeto', 'clase_encoded', 'video_id']
+        
+        for col in self.combined_data.columns:
+            if (self.combined_data[col].dtype in ['float64', 'int64'] and 
+                col not in exclude_cols):
+                # Verificar que la columna no esté completamente vacía o sea constante
+                if not self.combined_data[col].isnull().all() and self.combined_data[col].nunique() > 1:
+                    numeric_features.append(col)
+        
+        return numeric_features[:20]  # Limitar para evitar problemas de memoria
+    
+    def _create_video_features(self, numeric_features):
+        """Crea características agregadas por video."""
+        print(f"  Creando características por video...")
+        
+        try:
+            # Preparar agregaciones de manera más robusta
+            agg_dict = {}
+            
+            # Agregar características numéricas
+            for feat in numeric_features[:15]:  # Limitar para evitar errores
+                agg_dict[feat] = ['mean', 'max', 'std', 'min']
+            
+            # Agregar metadatos
+            if 'Frame' in self.combined_data.columns:
+                agg_dict['Frame'] = 'max'
+            if 'Objeto' in self.combined_data.columns:
+                agg_dict['Objeto'] = 'nunique'
+            
+            agg_dict['clase'] = 'first'
+            agg_dict['clase_encoded'] = 'first'
+            
+            video_features = self.combined_data.groupby('video_id').agg(agg_dict)
+            
+            # Aplanar nombres de columnas de manera más robusta
+            new_columns = []
+            for col in video_features.columns:
+                if isinstance(col, tuple):
+                    new_columns.append('_'.join(map(str, col)).strip('_'))
                 else:
-                    self.data[col].fillna("Desconocido", inplace=True)
+                    new_columns.append(str(col))
+            
+            video_features.columns = new_columns
+            video_features = video_features.reset_index()
+            
+            return video_features
+            
+        except Exception as e:
+            print(f"    ❌ Error creando características por video: {e}")
+            return None
+    
+    def _create_object_features(self, numeric_features):
+        """Crea características agregadas por objeto."""
+        print(f"  Creando características por objeto...")
+        
+        if 'Objeto' not in self.combined_data.columns:
+            print("    ⚠️ Columna 'Objeto' no encontrada, saltando nivel objeto")
+            return None
+        
+        try:
+            agg_dict = {}
+            
+            # Agregar características numéricas
+            for feat in numeric_features[:15]:
+                agg_dict[feat] = ['mean', 'max', 'std']
+            
+            # Agregar metadatos
+            if 'Frame' in self.combined_data.columns:
+                agg_dict['Frame'] = ['min', 'max', 'count']
+            
+            agg_dict['clase'] = 'first'
+            agg_dict['clase_encoded'] = 'first'
+            
+            object_features = self.combined_data.groupby(['video_id', 'Objeto']).agg(agg_dict)
+            
+            # Aplanar nombres de columnas
+            new_columns = []
+            for col in object_features.columns:
+                if isinstance(col, tuple):
+                    new_columns.append('_'.join(map(str, col)).strip('_'))
+                else:
+                    new_columns.append(str(col))
+            
+            object_features.columns = new_columns
+            object_features = object_features.reset_index()
+            
+            return object_features
+            
+        except Exception as e:
+            print(f"    ❌ Error creando características por objeto: {e}")
+            return None
+    
+    def _create_frame_features(self, numeric_features):
+        """Crea características agregadas por frame."""
+        print(f"  Creando características por frame...")
+        
+        if 'Frame' not in self.combined_data.columns:
+            print("    ⚠️ Columna 'Frame' no encontrada, saltando nivel frame")
+            return None
+        
+        try:
+            agg_dict = {}
+            
+            # Agregar características numéricas
+            for feat in numeric_features[:15]:
+                agg_dict[feat] = ['mean', 'max']
+            
+            # Agregar metadatos
+            if 'Objeto' in self.combined_data.columns:
+                agg_dict['Objeto'] = 'nunique'
+            
+            agg_dict['clase'] = 'first'
+            agg_dict['clase_encoded'] = 'first'
+            
+            frame_features = self.combined_data.groupby(['video_id', 'Frame']).agg(agg_dict)
+            
+            # Aplanar nombres de columnas
+            new_columns = []
+            for col in frame_features.columns:
+                if isinstance(col, tuple):
+                    new_columns.append('_'.join(map(str, col)).strip('_'))
+                else:
+                    new_columns.append(str(col))
+            
+            frame_features.columns = new_columns
+            frame_features = frame_features.reset_index()
+            
+            return frame_features
+            
+        except Exception as e:
+            print(f"    ❌ Error creando características por frame: {e}")
+            return None
+    
+    def create_lstm_sequences(self):
+        """
+        Crea secuencias temporales para LSTM si se requieren datos agregados.
+        """
+        if not self.use_aggregated_data:
+            print("⚠️ LSTM deshabilitado (datos agregados requeridos)")
+            return None, None
+        
+        if self.combined_data is None:
+            raise ValueError("Datos no cargados. Ejecute load_cleaned_data() primero.")
+        
+        print(f"\n🕐 CREANDO SECUENCIAS TEMPORALES PARA LSTM...")
+        
+        sequences = {}
+        sequence_info = []
+        
+        # Identificar características para secuencias
+        numeric_cols = self.combined_data.select_dtypes(include=[np.number]).columns
+        feature_cols = [col for col in numeric_cols 
+                       if col not in ['Frame', 'Objeto', 'clase_encoded']]
+        
+        if len(feature_cols) == 0:
+            print("❌ No hay características numéricas para LSTM")
+            return None, None
+        
+        available_features = feature_cols[:10]  # Limitar a 10 características
+        print(f"  Usando {len(available_features)} características para secuencias")
+        
+        for video_id in self.combined_data['video_id'].unique():
+            try:
+                video_data = self.combined_data[self.combined_data['video_id'] == video_id]
+                
+                # Crear secuencia basada en frames o índice temporal
+                sequence = self._create_video_sequence(video_data, available_features)
+                
+                if sequence is not None and len(sequence) > 0 and not np.isnan(sequence).all():
+                    sequences[video_id] = sequence
                     
-        print(f"Datos después de limpieza: {len(self.data)} registros")
-        return self.data
+                    sequence_info.append({
+                        'video_id': video_id,
+                        'sequence_length': len(sequence),
+                        'num_features': sequence.shape[1] if len(sequence.shape) > 1 else 1,
+                        'clase': video_data['clase'].iloc[0],
+                        'clase_encoded': video_data['clase_encoded'].iloc[0]
+                    })
+                
+            except Exception as e:
+                print(f"    ⚠️ Error procesando {video_id}: {str(e)}")
+        
+        if sequences:
+            avg_length = np.mean([len(seq) for seq in sequences.values()])
+            print(f"  ✅ {len(sequences)} secuencias creadas")
+            print(f"  Longitud promedio: {avg_length:.1f}")
+        else:
+            print("❌ No se pudieron crear secuencias")
+        
+        return sequences, pd.DataFrame(sequence_info) if sequence_info else None
     
-    def prepare_features_by_frame(self):
-        """
-        Prepara características agregadas por frame para cada video.
-        """
-        print("Preparando características agregadas por frame...")
-        
-        # Agrupar por video, frame y calcular estadísticas
-        frame_features = self.data.groupby(['video_id', 'Frame']).agg({
-            'Desplazamiento': ['mean', 'max', 'std'],
-            'Velocidad': ['mean', 'max', 'std'],
-            'Aceleracion': ['mean', 'max', 'std'],
-            'Densidad': 'mean',
-            'Linealidad': 'mean',
-            'Circularidad': 'mean',
-            'Zigzag': 'mean',
-            'Es_Ciclico': 'mean',
-            'Area_Trayectoria': 'mean',
-            'En_Interaccion': 'mean',
-            'clase': 'first'  # Mantener la etiqueta de clase
-        }).reset_index()
-        
-        # Aplanar las columnas multiíndice
-        frame_features.columns = ['_'.join(col).strip('_') for col in frame_features.columns.values]
-        
-        # Codificar la variable de clase
-        frame_features['clase_encoded'] = self.label_encoder.fit_transform(frame_features['clase_first'])
-        
-        # Guardar datos por frame
-        frame_features.to_csv(os.path.join(self.output_dir, 'frame_features.csv'), index=False)
-        print(f"Características por frame guardadas: {len(frame_features)} registros")
-        
-        return frame_features
-    
-    def prepare_features_by_object(self):
-        """
-        Prepara características agregadas por objeto para cada video.
-        """
-        print("Preparando características agregadas por objeto...")
-        
-        # Agrupar por video, objeto y calcular estadísticas temporales
-        object_features = self.data.groupby(['video_id', 'Objeto']).agg({
-            'Desplazamiento': ['mean', 'max', 'std', 'sum'],
-            'Velocidad': ['mean', 'max', 'std'],
-            'Aceleracion': ['mean', 'max', 'std'],
-            'Linealidad': 'mean',
-            'Circularidad': 'mean',
-            'Zigzag': 'mean',
-            'Es_Ciclico': 'mean',
-            'Area_Trayectoria': 'max',
-            'En_Interaccion': 'mean',
-            'clase': 'first'  # Mantener la etiqueta de clase
-        }).reset_index()
-        
-        # Aplanar las columnas multiíndice
-        object_features.columns = ['_'.join(col).strip('_') for col in object_features.columns.values]
-        
-        # Codificar la variable de clase
-        object_features['clase_encoded'] = self.label_encoder.fit_transform(object_features['clase_first'])
-        
-        # Guardar datos por objeto
-        object_features.to_csv(os.path.join(self.output_dir, 'object_features.csv'), index=False)
-        print(f"Características por objeto guardadas: {len(object_features)} registros")
-        
-        return object_features
-    
-    def prepare_features_by_video(self):
-        """
-        Prepara características agregadas por video.
-        """
-        print("Preparando características agregadas por video...")
-        
-        # Agrupar por video y calcular estadísticas globales
-        video_features = self.data.groupby(['video_id']).agg({
-            'Frame': 'max',  # Duración aproximada del video
-            'Desplazamiento': ['mean', 'max', 'std', 'sum'],
-            'Velocidad': ['mean', 'max', 'std'],
-            'Aceleracion': ['mean', 'max', 'std'],
-            'Densidad': 'mean',
-            'Linealidad': 'mean',
-            'Circularidad': 'mean',
-            'Zigzag': 'mean',
-            'Es_Ciclico': 'mean',
-            'Area_Trayectoria': ['mean', 'max'],
-            'En_Interaccion': 'mean',
-            'clase': 'first'  # Mantener la etiqueta de clase
-        }).reset_index()
-        
-        # Aplanar las columnas multiíndice
-        video_features.columns = ['_'.join(col).strip('_') for col in video_features.columns.values]
-        
-        # Codificar la variable de clase
-        video_features['clase_encoded'] = self.label_encoder.fit_transform(video_features['clase_first'])
-        
-        # Obtener conteos de objetos y trayectorias por video
-        objetos_por_video = self.data.groupby('video_id')['Objeto'].nunique().reset_index()
-        objetos_por_video.columns = ['video_id', 'num_objetos']
-        
-        # Combinar con las características de video
-        video_features = pd.merge(video_features, objetos_por_video, on='video_id', how='left')
-        
-        # Calcular características adicionales por video
-        patron_stats = self.data.groupby(['video_id', 'Patron_Movimiento']).size().unstack(fill_value=0)
-        patron_stats = patron_stats.div(patron_stats.sum(axis=1), axis=0)  # Normalizar a proporciones
-        
-        # Renombrar columnas y combinar con características de video
-        patron_stats.columns = [f'patron_{col.lower()}_ratio' for col in patron_stats.columns]
-        patron_stats.reset_index(inplace=True)
-        
-        video_features = pd.merge(video_features, patron_stats, on='video_id', how='left')
-        
-        # Guardar datos por video
-        video_features.to_csv(os.path.join(self.output_dir, 'video_features.csv'), index=False)
-        print(f"Características por video guardadas: {len(video_features)} registros")
-        
-        return video_features
-    
-    def prepare_features_for_lstm(self):
-        """
-        Prepara secuencias temporales para entrenamiento de LSTM.
-        Agrega características por frame para cada video, manteniendo el orden temporal.
-        """
-        print("Preparando secuencias temporales para LSTM...")
-        
-        # Ordenar datos por video y frame
-        sorted_data = self.data.sort_values(['video_id', 'Frame'])
-        
-        # Crear características secuenciales por frame para cada video
-        video_sequences = {}
-        classes = {}
-        
-        for video_id, video_data in sorted_data.groupby('video_id'):
-            # Agrupar por frame para obtener características agregadas
-            frame_data = video_data.groupby('Frame').agg({
-                'Desplazamiento': ['mean', 'max'],
-                'Velocidad': ['mean', 'max'],
-                'Aceleracion': ['mean', 'max'],
-                'Densidad': 'mean',
-                'Linealidad': 'mean',
-                'Circularidad': 'mean',
-                'Zigzag': 'mean',
-                'Es_Ciclico': 'mean',
-                'Area_Trayectoria': 'mean',
-                'En_Interaccion': 'mean',
-                'clase': 'first'
-            })
+    def _create_video_sequence(self, video_data, features):
+        """Crea secuencia temporal para un video específico."""
+        try:
+            if 'Frame' in video_data.columns and video_data['Frame'].nunique() > 1:
+                # Agrupar por frame
+                frame_stats = video_data.groupby('Frame')[features].mean()
+                # Rellenar NaN con interpolación
+                frame_stats = frame_stats.interpolate().fillna(method='bfill').fillna(method='ffill')
+            else:
+                # Si no hay Frame, usar ventana deslizante
+                video_features = video_data[features].fillna(0)
+                if len(video_features) > 5:
+                    frame_stats = video_features.rolling(window=5, min_periods=1).mean()
+                else:
+                    frame_stats = video_features
             
-            # Aplanar las columnas multiíndice
-            frame_data.columns = ['_'.join(col).strip('_') for col in frame_data.columns.values]
+            sequence = frame_stats.values
             
-            # Extraer características numéricas para la secuencia
-            features_cols = [col for col in frame_data.columns if col != 'clase_first']
-            sequence = frame_data[features_cols].values
+            # Validar secuencia
+            if len(sequence) == 0 or np.isnan(sequence).all():
+                return None
             
-            # Almacenar secuencia y clase
-            video_sequences[video_id] = sequence
-            classes[video_id] = frame_data['clase_first'].iloc[0]
-        
-        # Guardar datos para LSTM en formato numpy
-        os.makedirs(os.path.join(self.output_dir, 'lstm_data'), exist_ok=True)
-        
-        # Crear un CSV con información de las secuencias y clases
-        sequence_info = pd.DataFrame({
-            'video_id': list(video_sequences.keys()),
-            'sequence_length': [len(seq) for seq in video_sequences.values()],
-            'clase': [classes[vid] for vid in video_sequences.keys()]
-        })
-        
-        sequence_info['clase_encoded'] = self.label_encoder.fit_transform(sequence_info['clase'])
-        sequence_info.to_csv(os.path.join(self.output_dir, 'lstm_data', 'sequence_info.csv'), index=False)
-        
-        # Guardar cada secuencia como un archivo numpy
-        for video_id, sequence in video_sequences.items():
-            np.save(os.path.join(self.output_dir, 'lstm_data', f'{video_id}.npy'), sequence)
-        
-        print(f"Secuencias temporales guardadas para {len(video_sequences)} videos")
-        return sequence_info
+            return sequence
+            
+        except Exception as e:
+            print(f"      Error creando secuencia: {e}")
+            return None
     
-    def split_data(self, test_size=0.2, val_size=0.1, random_state=42):
+    def split_data_optimized(self, test_size=0.25, val_size=0.15, random_state=42):
         """
-        Divide los datos procesados en conjuntos de entrenamiento, validación y prueba.
-        
-        Parámetros:
-        -----------
-        test_size : float
-            Proporción de datos para el conjunto de prueba
-        val_size : float
-            Proporción de datos para el conjunto de validación
-        random_state : int
-            Semilla para reproducibilidad
+        División optimizada con datos reservados para evaluación final.
         """
-        print("Dividiendo datos en conjuntos de entrenamiento, validación y prueba...")
+        if self.video_info is None:
+            raise ValueError("Información de video no disponible. Ejecute load_cleaned_data() primero.")
         
-        # Obtener conjuntos de IDs de videos únicos
-        video_ids = self.data['video_id'].unique()
+        print(f"\n✂️ DIVIDIENDO DATOS CON EVALUACIÓN FINAL RESERVADA...")
+        print("⚠️ IMPORTANTE: Los datos de TEST se reservan completamente")
         
-        # Primera división: separar conjunto de prueba
-        train_val_ids, test_ids = train_test_split(
-            video_ids, test_size=test_size, random_state=random_state, 
-            stratify=self.data.drop_duplicates('video_id')['clase']
+        # Usar información de video para división estratificada
+        unique_videos = self.video_info[['video_id', 'clase']].copy()
+        
+        print(f"\n📊 Distribución original:")
+        for clase in unique_videos['clase'].unique():
+            count = len(unique_videos[unique_videos['clase'] == clase])
+            print(f"   {clase}: {count} videos")
+        
+        # División estratificada con manejo de errores
+        try:
+            split_info = self._perform_stratified_split(unique_videos, test_size, val_size, random_state)
+        except Exception as e:
+            print(f"⚠️ División estratificada falló: {e}")
+            split_info = self._perform_manual_split(unique_videos, test_size, val_size, random_state)
+        
+        # Mostrar estadísticas finales
+        self._print_split_statistics(split_info)
+        
+        return split_info
+    
+    def _perform_stratified_split(self, unique_videos, test_size, val_size, random_state):
+        """Realiza división estratificada."""
+        train_val_videos, test_videos = train_test_split(
+            unique_videos['video_id'].values,
+            test_size=test_size,
+            stratify=unique_videos['clase'].values,
+            random_state=random_state
         )
         
-        # Segunda división: separar conjunto de validación de entrenamiento
-        val_size_adjusted = val_size / (1 - test_size)  # Ajustar proporción
-        train_ids, val_ids = train_test_split(
-            train_val_ids, test_size=val_size_adjusted, random_state=random_state,
-            stratify=self.data[self.data['video_id'].isin(train_val_ids)].drop_duplicates('video_id')['clase']
+        # Segunda división para validación
+        train_val_info = unique_videos[unique_videos['video_id'].isin(train_val_videos)]
+        val_size_adjusted = val_size / (1 - test_size)
+        
+        train_videos, val_videos = train_test_split(
+            train_val_videos,
+            test_size=val_size_adjusted,
+            stratify=train_val_info['clase'].values,
+            random_state=random_state
         )
         
-        # Guardar los IDs de cada conjunto
-        splits = {
-            'train': train_ids,
-            'val': val_ids,
-            'test': test_ids
-        }
-        
-        # Crear DataFrame con la información de división
-        split_info = pd.DataFrame({
-            'video_id': video_ids,
-            'split': ['train' if vid in train_ids else 'val' if vid in val_ids else 'test' for vid in video_ids]
-        })
-        
-        # Añadir información de clase
-        video_classes = self.data.drop_duplicates('video_id')[['video_id', 'clase']]
-        split_info = pd.merge(split_info, video_classes, on='video_id')
-        
-        # Guardar información de división
-        split_info.to_csv(os.path.join(self.output_dir, 'data_split.csv'), index=False)
-        
-        print(f"División completada: {len(train_ids)} videos de entrenamiento, "
-              f"{len(val_ids)} de validación, {len(test_ids)} de prueba")
-        
-        return splits
+        return self._create_split_info(unique_videos, train_videos, val_videos, test_videos)
     
-    def scale_features(self, frame_features, object_features, video_features):
+    def _perform_manual_split(self, unique_videos, test_size, val_size, random_state):
+        """Realiza división manual cuando la estratificada falla."""
+        print("Usando división manual...")
+        
+        np.random.seed(random_state)
+        test_videos = []
+        train_val_videos = []
+        
+        for clase in unique_videos['clase'].unique():
+            clase_videos = unique_videos[unique_videos['clase'] == clase]['video_id'].values
+            np.random.shuffle(clase_videos)
+            
+            n_test = max(1, int(len(clase_videos) * test_size))
+            test_videos.extend(clase_videos[:n_test])
+            train_val_videos.extend(clase_videos[n_test:])
+        
+        # División train/val
+        train_videos = []
+        val_videos = []
+        
+        for clase in unique_videos['clase'].unique():
+            clase_train_val = [v for v in train_val_videos 
+                             if unique_videos[unique_videos['video_id'] == v]['clase'].iloc[0] == clase]
+            
+            if len(clase_train_val) > 1:
+                n_val = max(1, int(len(clase_train_val) * val_size / (1 - test_size)))
+                val_videos.extend(clase_train_val[:n_val])
+                train_videos.extend(clase_train_val[n_val:])
+            else:
+                train_videos.extend(clase_train_val)
+        
+        return self._create_split_info(unique_videos, train_videos, val_videos, test_videos)
+    
+    def _create_split_info(self, unique_videos, train_videos, val_videos, test_videos):
+        """Crea DataFrame con información de división."""
+        split_info = unique_videos.copy()
+        
+        split_info['split'] = split_info['video_id'].apply(
+            lambda x: 'train' if x in train_videos else 
+                     'val' if x in val_videos else 'test'
+        )
+        
+        return split_info
+    
+    def _print_split_statistics(self, split_info):
+        """Imprime estadísticas de la división."""
+        print(f"\n📊 DIVISIÓN FINAL:")
+        try:
+            split_counts = split_info.groupby(['split', 'clase']).size().unstack(fill_value=0)
+            print(split_counts)
+        except Exception as e:
+            print(f"Error mostrando tabla: {e}")
+        
+        totals = split_info['split'].value_counts()
+        for split in ['train', 'val', 'test']:
+            if split in totals:
+                count = totals[split]
+                percentage = (count / len(split_info)) * 100
+                print(f"   {split.upper()}: {count} videos ({percentage:.1f}%)")
+        
+        print(f"\n⚠️ ADVERTENCIA CRÍTICA:")
+        print(f"   Los {totals.get('test', 0)} videos de TEST están RESERVADOS")
+        print(f"   NO se usan para entrenamiento, validación o selección de características")
+    
+    def scale_features(self, datasets_dict, split_info):
         """
-        Escala las características numéricas usando StandardScaler.
-        
-        Parámetros:
-        -----------
-        frame_features : DataFrame
-            Características agregadas por frame
-        object_features : DataFrame
-            Características agregadas por objeto
-        video_features : DataFrame
-            Características agregadas por video
+        Escala características usando solo datos de entrenamiento.
         """
-        print("Escalando características...")
+        if not datasets_dict:
+            print("⚠️ No hay datasets para escalar")
+            return {}
         
-        # Cargar información de división
-        split_info = pd.read_csv(os.path.join(self.output_dir, 'data_split.csv'))
-        
-        datasets = {
-            'frame': frame_features,
-            'object': object_features,
-            'video': video_features
-        }
+        print(f"\n🔧 ESCALANDO CARACTERÍSTICAS...")
         
         scaled_datasets = {}
         
-        for name, dataset in datasets.items():
-            # Identificar qué características escalar (excluyendo identificadores y clases)
-            id_cols = ['video_id']
-            if name == 'frame':
-                id_cols.append('Frame_')
-            elif name == 'object':
-                id_cols.append('Objeto_')
+        for dataset_name, dataset in datasets_dict.items():
+            if dataset is None or dataset.empty:
+                continue
                 
-            target_cols = ['clase_first', 'clase_encoded']
+            print(f"  Escalando dataset {dataset_name}...")
             
-            # Identificar columnas numéricas a escalar
-            cols_to_scale = dataset.select_dtypes(include=['float64', 'int64']).columns
-            cols_to_scale = [col for col in cols_to_scale if not any(col.startswith(id_col) for id_col in id_cols) 
-                            and col not in target_cols]
-            
-            # Dividir en conjuntos de entrenamiento, validación y prueba
-            train_data = dataset[dataset['video_id'].isin(split_info[split_info['split'] == 'train']['video_id'])]
-            val_data = dataset[dataset['video_id'].isin(split_info[split_info['split'] == 'val']['video_id'])]
-            test_data = dataset[dataset['video_id'].isin(split_info[split_info['split'] == 'test']['video_id'])]
-            
-            # Ajustar scaler solo con datos de entrenamiento
-            scaler = StandardScaler()
-            scaler.fit(train_data[cols_to_scale])
-            
-            # Aplicar transformación a todos los conjuntos
-            for split_name, split_data in zip(['train', 'val', 'test'], [train_data, val_data, test_data]):
-                # Crear copia para no modificar el original
-                scaled_data = split_data.copy()
-                
-                # Aplicar transformación
-                if len(split_data) > 0:
-                    scaled_data[cols_to_scale] = scaler.transform(split_data[cols_to_scale])
-                
-                # Guardar datos escalados
-                scaled_data.to_csv(os.path.join(self.output_dir, f'{name}_{split_name}_scaled.csv'), index=False)
-                
-                # Almacenar para retornar
-                key = f'{name}_{split_name}'
-                scaled_datasets[key] = scaled_data
-            
-            # Guardar scaler para futuras transformaciones
-            np.save(os.path.join(self.output_dir, f'{name}_scaler_mean.npy'), scaler.mean_)
-            np.save(os.path.join(self.output_dir, f'{name}_scaler_scale.npy'), scaler.scale_)
+            try:
+                scaled_data = self._scale_single_dataset(dataset, dataset_name, split_info)
+                scaled_datasets.update(scaled_data)
+            except Exception as e:
+                print(f"    ❌ Error escalando {dataset_name}: {e}")
         
-        print("Escalado de características completado")
         return scaled_datasets
+    
+    def _scale_single_dataset(self, dataset, dataset_name, split_info):
+        """Escala un dataset individual."""
+        # Identificar columnas a escalar
+        exclude_patterns = ['video_id', 'Objeto', 'clase', 'Frame', 'split']
+        numeric_cols = dataset.select_dtypes(include=[np.number]).columns
+        cols_to_scale = [col for col in numeric_cols 
+                       if not any(pattern in col for pattern in exclude_patterns)]
+        
+        if len(cols_to_scale) == 0:
+            print(f"    ⚠️ No hay columnas para escalar en {dataset_name}")
+            return {}
+        
+        # Crear máscaras para división
+        train_mask = dataset['video_id'].isin(
+            split_info[split_info['split'] == 'train']['video_id']
+        )
+        val_mask = dataset['video_id'].isin(
+            split_info[split_info['split'] == 'val']['video_id']
+        )
+        test_mask = dataset['video_id'].isin(
+            split_info[split_info['split'] == 'test']['video_id']
+        )
+        
+        # Dividir datos
+        train_data = dataset[train_mask].copy()
+        val_data = dataset[val_mask].copy()
+        test_data = dataset[test_mask].copy()
+        
+        if len(train_data) == 0:
+            print(f"    ⚠️ No hay datos de entrenamiento para {dataset_name}")
+            return {}
+        
+        # Crear y ajustar escalador
+        scaler = StandardScaler()
+        
+        # Manejar NaN en datos de entrenamiento
+        train_features = train_data[cols_to_scale].fillna(0)
+        
+        # Verificar que no hay valores infinitos
+        train_features = train_features.replace([np.inf, -np.inf], 0)
+        
+        scaler.fit(train_features)
+        
+        # Aplicar escalado
+        train_data[cols_to_scale] = scaler.transform(train_features)
+        
+        scaled_data = {f'{dataset_name}_train': train_data}
+        
+        if len(val_data) > 0:
+            val_features = val_data[cols_to_scale].fillna(0).replace([np.inf, -np.inf], 0)
+            val_data[cols_to_scale] = scaler.transform(val_features)
+            scaled_data[f'{dataset_name}_val'] = val_data
+            
+        if len(test_data) > 0:
+            test_features = test_data[cols_to_scale].fillna(0).replace([np.inf, -np.inf], 0)
+            test_data[cols_to_scale] = scaler.transform(test_features)
+            scaled_data[f'{dataset_name}_test'] = test_data
+        
+        # Guardar escalador
+        scaler_params = {
+            'mean_': scaler.mean_,
+            'scale_': scaler.scale_,
+            'feature_names': cols_to_scale
+        }
+        
+        scaler_file = self.output_dir / f'{dataset_name}_scaler.npy'
+        np.save(scaler_file, scaler_params, allow_pickle=True)
+        
+        print(f"    ✅ {dataset_name}: {len(cols_to_scale)} características escaladas")
+        
+        return scaled_data
+    
+    def save_all_data(self, datasets_dict, scaled_datasets, split_info, sequences=None, sequence_info=None):
+        """
+        Guarda todos los datos procesados.
+        """
+        print(f"\n💾 GUARDANDO TODOS LOS DATOS PROCESADOS...")
+        
+        try:
+            # Guardar datasets originales
+            for name, dataset in datasets_dict.items():
+                if dataset is not None and not dataset.empty:
+                    file_path = self.output_dir / f'{name}_features.csv'
+                    dataset.to_csv(file_path, index=False)
+                    print(f"  ✅ {name}_features.csv guardado")
+            
+            # Guardar datasets escalados
+            for name, dataset in scaled_datasets.items():
+                if dataset is not None and not dataset.empty:
+                    file_path = self.output_dir / f'{name}_scaled.csv'
+                    dataset.to_csv(file_path, index=False)
+                    print(f"  ✅ {name}_scaled.csv guardado")
+            
+            # Guardar información de división
+            if split_info is not None:
+                split_file = self.output_dir / 'data_split.csv'
+                split_info.to_csv(split_file, index=False)
+                print(f"  ✅ data_split.csv guardado")
+            
+            # Guardar información de video
+            if self.video_info is not None:
+                video_file = self.output_dir / 'video_info.csv'
+                self.video_info.to_csv(video_file, index=False)
+                print(f"  ✅ video_info.csv guardado")
+            
+            # Guardar datos LSTM si existen
+            if sequences is not None and sequence_info is not None:
+                self._save_lstm_data(sequences, sequence_info)
+            
+            # Guardar metadatos
+            self._save_metadata(datasets_dict, split_info)
+            
+            print(f"\n💾 Todos los datos guardados en: {self.output_dir}")
+            
+        except Exception as e:
+            print(f"❌ Error guardando datos: {e}")
+            raise
+    
+    def _save_lstm_data(self, sequences, sequence_info):
+        """Guarda datos específicos para LSTM."""
+        lstm_dir = self.output_dir / 'lstm_data'
+        lstm_dir.mkdir(exist_ok=True)
+        
+        # Guardar información de secuencias
+        seq_info_file = lstm_dir / 'sequence_info.csv'
+        sequence_info.to_csv(seq_info_file, index=False)
+        
+        # Guardar secuencias individuales
+        for video_id, sequence in sequences.items():
+            seq_file = lstm_dir / f'{video_id}.npy'
+            np.save(seq_file, sequence)
+        
+        print(f"  ✅ Datos LSTM guardados ({len(sequences)} secuencias)")
+    
+    def _save_metadata(self, datasets_dict, split_info):
+        """Guarda metadatos del procesamiento."""
+        metadata = {
+            'total_videos': len(self.video_info) if self.video_info is not None else 0,
+            'classes': list(self.video_info['clase'].unique()) if self.video_info is not None else [],
+            'class_distribution': self.video_info['clase'].value_counts().to_dict() if self.video_info is not None else {},
+            'total_records': len(self.combined_data) if self.combined_data is not None else 0,
+            'split_distribution': split_info['split'].value_counts().to_dict() if split_info is not None else {},
+            'use_original_data': self.use_original_data,
+            'use_aggregated_data': self.use_aggregated_data,
+            'datasets_created': list(datasets_dict.keys()) if datasets_dict else [],
+            'processing_timestamp': pd.Timestamp.now().isoformat()
+        }
+        
+        metadata_file = self.output_dir / 'metadata.json'
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        
+        print(f"  ✅ metadata.json guardado")
     
     def process_all(self):
         """
-        Ejecuta todos los pasos de procesamiento en secuencia.
+        Ejecuta todo el pipeline de procesamiento mejorado.
         """
-        # Cargar datos
-        self.load_data()
+        print("🚀 INICIANDO PROCESAMIENTO COMPLETO MEJORADO")
+        print("="*60)
         
-        # Limpiar datos
-        self.clean_data()
+        try:
+            # 1. Cargar datos limpiados
+            print("\n📥 Paso 1: Cargando datos limpiados...")
+            combined_data, video_info = self.load_cleaned_data()
+            
+            # 2. Preparar datasets según configuración
+            print("\n🔧 Paso 2: Preparando datasets...")
+            datasets_dict = {}
+            
+            # Datos originales
+            if self.use_original_data:
+                print("\n📊 Procesando datos originales...")
+                original_data, original_features = self.process_original_data()
+                if original_data is not None:
+                    datasets_dict['original'] = original_data
+            
+            # Datos agregados
+            if self.use_aggregated_data:
+                print("\n🔧 Procesando datos agregados...")
+                video_features, object_features, frame_features = self.create_features_by_level()
+                
+                if video_features is not None:
+                    datasets_dict['video'] = video_features
+                if object_features is not None:
+                    datasets_dict['object'] = object_features
+                if frame_features is not None:
+                    datasets_dict['frame'] = frame_features
+            
+            # 3. Crear secuencias LSTM
+            print("\n🕐 Paso 3: Creando secuencias LSTM...")
+            sequences, sequence_info = None, None
+            if self.use_aggregated_data:
+                sequences, sequence_info = self.create_lstm_sequences()
+            
+            # 4. Dividir datos
+            print("\n✂️ Paso 4: Dividiendo datos...")
+            split_info = self.split_data_optimized()
+            
+            # 5. Escalar características
+            print("\n🔧 Paso 5: Escalando características...")
+            scaled_datasets = self.scale_features(datasets_dict, split_info)
+            
+            # 6. Guardar todo
+            print("\n💾 Paso 6: Guardando datos...")
+            self.save_all_data(datasets_dict, scaled_datasets, split_info, sequences, sequence_info)
+            
+            # Resumen final
+            self._print_final_summary(datasets_dict, scaled_datasets, sequences)
+            
+            print(f"\n🎉 PROCESAMIENTO MEJORADO COMPLETADO!")
+            print(f"   Datasets creados: {list(datasets_dict.keys())}")
+            print(f"   Datos guardados en: {self.output_dir}")
+            
+            return {
+                'datasets': datasets_dict,
+                'scaled_datasets': scaled_datasets,
+                'split_info': split_info,
+                'sequences': sequences,
+                'sequence_info': sequence_info,
+                'video_info': video_info,
+                'combined_data': combined_data
+            }
+            
+        except Exception as e:
+            print(f"❌ Error en procesamiento: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _print_final_summary(self, datasets_dict, scaled_datasets, sequences):
+        """Imprime resumen final del procesamiento."""
+        print(f"\n📋 RESUMEN FINAL DEL PROCESAMIENTO:")
         
-        # Preparar características por nivel
-        frame_features = self.prepare_features_by_frame()
-        object_features = self.prepare_features_by_object()
-        video_features = self.prepare_features_by_video()
+        # Datasets originales
+        print(f"\n🗂️ Datasets originales creados:")
+        for name, dataset in datasets_dict.items():
+            if dataset is not None:
+                print(f"   {name}: {len(dataset)} registros")
         
-        # Preparar secuencias para LSTM
-        self.prepare_features_for_lstm()
+        # Datasets escalados
+        print(f"\n⚖️ Datasets escalados creados:")
+        splits = {}
+        for name in scaled_datasets.keys():
+            dataset_name = name.rsplit('_', 1)[0]
+            split_type = name.rsplit('_', 1)[1]
+            
+            if dataset_name not in splits:
+                splits[dataset_name] = {}
+            splits[dataset_name][split_type] = len(scaled_datasets[name])
         
-        # Dividir datos
-        self.split_data()
+        for dataset_name, split_counts in splits.items():
+            print(f"   {dataset_name}:")
+            for split_type, count in split_counts.items():
+                print(f"     {split_type}: {count} registros")
         
-        # Escalar características
-        scaled_data = self.scale_features(frame_features, object_features, video_features)
+        # Secuencias LSTM
+        if sequences:
+            print(f"\n🕐 Secuencias LSTM creadas: {len(sequences)}")
         
-        print("Procesamiento de datos completado con éxito")
-        return scaled_data
+        print(f"\n✅ Procesamiento completado exitosamente")
+
+def main():
+    """Función principal para ejecutar el procesador."""
+    
+    # Configuración del procesador
+    processor = EnhancedDataProcessor(
+        clean_data_dir='./cleaned_data/',
+        output_dir='./processed_data_enhanced/',
+        use_original_data=True,
+        use_aggregated_data=True
+    )
+    
+    # Ejecutar procesamiento completo
+    results = processor.process_all()
+    
+    if results is not None:
+        print(f"\n🎯 PROCESAMIENTO EXITOSO!")
+        print(f"   Total de videos procesados: {len(results['video_info'])}")
+        print(f"   Datasets disponibles: {list(results['datasets'].keys())}")
+        
+        # Mostrar algunas estadísticas adicionales
+        if 'split_info' in results and results['split_info'] is not None:
+            split_counts = results['split_info']['split'].value_counts()
+            print(f"   División de datos:")
+            for split, count in split_counts.items():
+                print(f"     {split}: {count} videos")
+    
+    else:
+        print(f"\n❌ PROCESAMIENTO FALLÓ!")
+        
+    return results
 
 if __name__ == "__main__":
-    processor = DataProcessor()
-    processor.process_all()
+    results = main()
