@@ -20,6 +20,11 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import GroupKFold
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import LeaveOneGroupOut
+
+# from iterstrat.ml_stratifiers import MultilabelStratifiedGroupKFold as MSGKF
+
 
 # ------------ 1.  Focal Loss -------------
 def focal_loss(alpha=0.25, gamma=2.0):
@@ -39,37 +44,63 @@ class VideoLSTM:
         self.encoder= LabelEncoder()
 
     # -- 2.1  leer CSV → secuencia -----------------
-    def _csv_to_sequence(self, csv_path):
+    def _csv_to_sequences_per_object(self, csv_path):
+        """
+        Devuelve una lista de (sequence, label, video_name) —una por OBJETO (persona).
+        Cada secuencia: máx 50 frames, con padding al final si es más corta.
+        """
         df = pd.read_csv(csv_path)
-        if df.empty: return None
-        wanted = ['Velocidad','Aceleracion',
-                  'Linealidad','Circularidad','Zigzag',
-                  'Densidad','Area_Trayectoria',
-                  'Centroide_X','Centroide_Y']
-        cols   = [c for c in wanted if c in df.columns]
-        seq    = []
-        for f in sorted(df.Frame.unique()):
-            fr = df[df.Frame==f]
-            vec = [fr[c].mean() for c in cols]
-            vec.append(fr['Objeto'].nunique())                      # num objetos
-            vec.append((fr['En_Interaccion']==1).mean() if 'En_Interaccion' in fr else 0.)
-            vec.append(float((fr['Es_Ciclico']==1).any()) if 'Es_Ciclico' in fr else 0.)
-            seq.append(vec)
-        return np.nan_to_num(np.array(seq,dtype=np.float32))
+        if df.empty: 
+            return []
+
+        video_name = Path(csv_path).stem
+        label      = 'normal' if 'normal'   in csv_path.stem else \
+                    'merodeo' if 'merodeo' in csv_path.stem else 'forcejeo'
+
+        wanted = ['Velocidad','Aceleracion','Cambio_Direccion',
+                'Linealidad','Circularidad','Zigzag',
+                'Densidad','Area_Trayectoria',
+                'Centroide_X','Centroide_Y']
+        cols = [c for c in wanted if c in df.columns]
+
+        seqs = []
+        max_len = 50
+        for obj_id, traj in df.groupby('Objeto'):
+            traj = traj.sort_values('Frame')
+            frames = []
+            for _, row in traj.iterrows():
+                vec = [row[c] for c in cols]
+                frames.append(vec)
+                if len(frames) == max_len:
+                    break
+            # padding
+            if len(frames) < max_len:
+                pad = np.zeros((max_len - len(frames), len(cols)), dtype=np.float32)
+                frames = np.vstack([frames, pad])
+            else:
+                frames = np.array(frames, dtype=np.float32)
+
+            frames = np.nan_to_num(frames)
+            seqs.append((frames, label, video_name))  # tuple
+        return seqs
 
     # -- 2.2  cargar todas las secuencias -----------
     def load_data(self, root, max_len=50):
         X, y, g = [], [], []
+        root = Path(root)
         for cls in ['normal','merodeo','forcejeo']:
-            for csv in Path(root,cls).glob('*.csv'):
-                s = self._csv_to_sequence(csv)
-                if s is None: continue
-                s = s[:max_len] if len(s)>max_len else \
-                    np.vstack([s, np.zeros((max_len-len(s), s.shape[1]))])
-                X.append(s); y.append(cls); g.append(csv.stem)
-        self.X = np.stack(X); self.y = np.array(y); self.groups=np.array(g)
-        print(f"ℹ️  Datos: {self.X.shape}  (videos={len(self.X)})")
-        print(f"ℹ️  Distribución: {dict(pd.Series(self.y).value_counts())}")
+            for csv in (root/cls).glob('*.csv'):
+                obj_seqs = self._csv_to_sequences_per_object(csv)
+                for seq, lbl, vid in obj_seqs:
+                    X.append(seq); y.append(lbl); g.append(vid)
+
+        self.X = np.stack(X)
+        self.y = np.array(y)
+        self.groups = np.array(g)
+
+        print(f"ℹ️  Trayectorias: {self.X.shape}  (videos={len(set(g))})")
+        print(f"ℹ️  Distrib. clases: {dict(pd.Series(self.y).value_counts())}")
+
 
     # -- 2.3  normalizar ----------------------------
     def _scale(self, train_idx, test_idx):
@@ -91,55 +122,64 @@ class VideoLSTM:
     # -- 2.4  construir modelo ----------------------
     def build_model(self, cfg, input_shape, n_classes):
         model = Sequential()
+        model.add(Masking(mask_value=0., input_shape=input_shape))     # NUEVO
         model.add(Bidirectional(
             LSTM(cfg['lstm_units_1'],
-                 return_sequences=False,
-                 dropout=cfg['dropout'],
-                 recurrent_dropout=0.3),
-            input_shape=input_shape))
+                return_sequences=False,
+                dropout=cfg['dropout'])))
         model.add(BatchNormalization())
         model.add(Dense(64, activation='relu'))
         model.add(Dropout(cfg['dropout']))
         model.add(Dense(n_classes, activation='softmax'))
         model.compile(optimizer=Adam(cfg['learning_rate']),
-                      loss=focal_loss(alpha=0.25, gamma=2.0),
-                      metrics=['accuracy'])
+                    loss='categorical_crossentropy',                # CAMBIO
+                    metrics=['accuracy'])
         return model
 
-    # ------------ 3.  Grid Search K-fold -----------
+
+    # ------------ 3.  Grid Search K-fold -------------
     def grid_search(self, param_grid, epochs=60, val_split=0.15):
         combos = list(itertools.product(*param_grid.values()))
         best_f1, best_cfg = -1, None
-        gkf = GroupKFold(n_splits=5)
+
+        # ❶  Ajusta el encoder ANTES de imprimir las clases
         y_enc = self.encoder.fit_transform(self.y)
+        print("Índices de clase:", dict(enumerate(self.encoder.classes_)))
         n_classes = len(self.encoder.classes_)
+
+        splitter = StratifiedGroupKFold(
+        n_splits=5, shuffle=True, random_state=42)
 
         for cfg_vals in combos:
             cfg = dict(zip(param_grid.keys(), cfg_vals))
             fold_f1 = []
             print(f"\n🔧 Probando cfg: {cfg}")
-            for k,(tr,te) in enumerate(gkf.split(self.X, y_enc, groups=self.groups)):
-                Xtr,Xte = self._scale(tr,te)
+
+            # ❷  Vuelve a enumerar los folds para usar k en el print
+            for k, (tr, te) in enumerate(
+                    splitter.split(self.X, y_enc, groups=self.groups), 1):
+                Xtr, Xte = self._scale(tr, te)
                 ytr, yte = y_enc[tr], y_enc[te]
-                ytr_cat  = to_categorical(ytr,n_classes); yte_cat=to_categorical(yte,n_classes)
+                ytr_cat, yte_cat = to_categorical(ytr, n_classes), to_categorical(yte, n_classes)
 
                 model = self.build_model(cfg, Xtr.shape[1:], n_classes)
+                cw = compute_class_weight('balanced', classes=np.unique(ytr), y=ytr)
 
-                cw = compute_class_weight('balanced',
-                                          classes=np.unique(ytr),
-                                          y=ytr)
-                model.fit(Xtr, ytr_cat,
-                          epochs=epochs,
-                          batch_size=cfg['batch_size'],
-                          validation_split=val_split,
-                          callbacks=[EarlyStopping(patience=5, restore_best_weights=True,
-                                                   monitor='val_loss')],
-                          class_weight=dict(enumerate(cw)),
-                          verbose=0)
+                model.fit(
+                    Xtr, ytr_cat,
+                    epochs=epochs,
+                    batch_size=cfg['batch_size'],
+                    validation_split=val_split,
+                    callbacks=[EarlyStopping(patience=5, restore_best_weights=True,
+                                            monitor='val_loss')],
+                    class_weight=dict(enumerate(cw)),
+                    verbose=0
+                )
 
-                y_pred = np.argmax(model.predict(Xte,verbose=0),1)
+                y_pred = np.argmax(model.predict(Xte, verbose=0), 1)
                 f1 = f1_score(yte, y_pred, average='macro')
-                fold_f1.append(f1); print(f"   Fold{k+1}: F1={f1:.3f}")
+                fold_f1.append(f1)
+                print(f"   Fold{k}: F1={f1:.3f}")
 
             avg_f1 = np.mean(fold_f1)
             print(f"➡️  F1-macro medio = {avg_f1:.3f}")
@@ -148,6 +188,7 @@ class VideoLSTM:
 
         print(f"\n🏆 Mejor cfg: {best_cfg} (F1-macro={best_f1:.3f})")
         return best_cfg
+
 
     # ------------ 4.  Entrenar final --------------
     def train_final(self, cfg, epochs=120, val_split=0.25):
@@ -189,10 +230,10 @@ if __name__ == "__main__":
 
     # -- Grid Search reducido
     param_grid = {
-    'lstm_units_1': [32, 64],
-    'dropout': [0.4],
-    'learning_rate': [0.0005],
-    'batch_size': [4]
+        'lstm_units_1': [32, 64, 128],
+        'dropout'     : [0.3, 0.4],
+        'learning_rate': [1e-4, 5e-4],
+        'batch_size'   : [8]
     }
     best_cfg = vid.grid_search(param_grid, epochs=60)
     vid.train_final(best_cfg, epochs=120, val_split=0.25)
