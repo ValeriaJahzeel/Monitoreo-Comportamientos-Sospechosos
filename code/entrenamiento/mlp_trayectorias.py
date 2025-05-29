@@ -1,116 +1,108 @@
-# mlp_trayectorias.py
-import numpy as np, pandas as pd
+#!/usr/bin/env python
+# mlp_trayectorias_final.py
+import numpy as np, pandas as pd, joblib, matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import StratifiedGroupKFold, train_test_split
+from sklearn.metrics import f1_score, confusion_matrix, ConfusionMatrixDisplay
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import f1_score
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.layers import Input, BatchNormalization, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.optimizers import Adam
-from sklearn.preprocessing import StandardScaler
-from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization
 
+# ---------------- configuración ----------------
+ROOT = r"D:\Documentos\Monitoreo-Comportamientos-Sospechosos\csv"
+MAX_LEN = 50
+COLS = ['Velocidad','Aceleracion','Linealidad',
+        'Circularidad','Zigzag','Densidad','Area_Trayectoria',
+        'Centroide_X','Centroide_Y']
+CFG = dict(h1=128, h2=64, drop=0.30, lr=5e-4, batch=32, epochs=120, patience=12)
 
-# ---------- cargador de datos secuenciales ----------
-class VideoDataset:
-    def __init__(self, max_len=50):
-        self.max_len = max_len
-        self.scaler, self.enc = StandardScaler(), LabelEncoder()
-        self.cols = ['Velocidad','Aceleracion','Linealidad',
-                     'Circularidad','Zigzag','Densidad','Area_Trayectoria',
-                     'Centroide_X','Centroide_Y']
+# ---------------- carga de datos ----------------
+def csv2seq(csv):
+    df = pd.read_csv(csv)
+    lbl = ('normal' if 'normal' in csv.stem else
+           'merodeo' if 'merodeo' in csv.stem else 'forcejeo')
+    for _, traj in df.groupby('Objeto'):
+        x = traj.sort_values('Frame')[COLS].values.astype('float32')[:MAX_LEN]
+        if len(x) < MAX_LEN:
+            x = np.vstack([x, np.zeros((MAX_LEN-len(x), len(COLS)), 'float32')])
+        yield x, lbl, csv.stem
 
-    def _csv2seq(self, csv):
-        df = pd.read_csv(csv); seqs=[]
-        label = ('normal' if 'normal'in csv.stem else
-                 'merodeo' if 'merodeo'in csv.stem else 'forcejeo')
-        df = df.sort_values(['Objeto','Frame'])
-        for _,traj in df.groupby('Objeto'):
-            x = traj[self.cols].values.astype('float32')[:self.max_len]
-            if len(x)<self.max_len:
-                x = np.vstack([x, np.zeros((self.max_len-len(x), len(self.cols)), 'float32')])
-            seqs.append((x, label, csv.stem))
-        return seqs
+X, y, g = [], [], []
+for cls in ['normal','merodeo','forcejeo']:
+    for csv in Path(ROOT, cls).glob('*.csv'):
+        for seq, lbl, vid in csv2seq(csv):
+            X.append(seq); y.append(lbl); g.append(vid)
+X = np.stack(X); y = np.array(y); g = np.array(g)
+enc = LabelEncoder(); y_enc = enc.fit_transform(y)
+print(f"Secuencias: {X.shape} | videos: {len(set(g))}")
 
-    def load(self, root):
-        X, y, g = [], [], []
-        for cls in ['normal','merodeo','forcejeo']:
-            for csv in Path(root, cls).glob('*.csv'):
-                for seq,lbl,vid in self._csv2seq(csv):
-                    X.append(seq); y.append(lbl); g.append(vid)
-        self.X = np.stack(X)
-        self.y = self.enc.fit_transform(y)
-        self.g = np.array(g)
-        print("Secuencias:", self.X.shape, "| vídeos únicos:", len(set(g)))
+# ---------------- agregados ----------------
+X_agg = np.concatenate([X.mean(1), X.std(1), X.max(1), X.min(1)], axis=1)
 
-# ---------- agregar estadísticas ----------
-def make_aggregates(X):
-    return np.concatenate([X.mean(1), X.std(1),
-                           X.max(1),  X.min(1)], axis=1)
+# ---------------- train / hold-out split ----------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X_agg, y_enc, test_size=0.20, stratify=y_enc, random_state=42)
 
-# ---------- MLP ----------
-# nuevo MLP
-def build_mlp(input_dim, h1=128, h2=64, drop=0.3, lr=5e-4, n_cls=3):
+scaler = StandardScaler().fit(X_train)
+X_train = scaler.transform(X_train); X_test = scaler.transform(X_test)
+n_cls = len(enc.classes_)
+
+# ---------------- modelo MLP ----------------
+def build_mlp(input_dim, n_cls, cfg):
     model = Sequential([
         Input(shape=(input_dim,)),
         BatchNormalization(),
-        Dense(h1, activation='relu'),
-        Dropout(drop),
-        Dense(h2, activation='relu'),
-        Dropout(drop),
+        Dense(cfg['h1'], activation='relu'),
+        Dropout(cfg['drop']),
+        Dense(cfg['h2'], activation='relu'),
+        Dropout(cfg['drop']),
         Dense(n_cls, activation='softmax')
     ])
-    model.compile(optimizer=Adam(lr),
-                  loss='categorical_crossentropy',
+    model.compile(Adam(cfg['lr']), 'categorical_crossentropy',
                   metrics=['accuracy'])
-    return model            # ← ahora sí devuelve el modelo
+    return model
 
+ytr_cat = to_categorical(y_train, n_cls); yte_cat = to_categorical(y_test, n_cls)
+cw = compute_class_weight(class_weight='balanced',
+                          classes=np.arange(n_cls), y=y_train)
 
-# ---------- cross-validation ----------
-def cv_mlp(ds, cfg, epochs=60, bs=16):
-    X = make_aggregates(ds.X)
-    n_cls = len(ds.enc.classes_)
-    cv = StratifiedGroupKFold(6, shuffle=True, random_state=42)
-    scores = []
-    for k, (tr, te) in enumerate(cv.split(X, ds.y, ds.g), 1):
+mlp = build_mlp(X_train.shape[1], n_cls, CFG)
+hist = mlp.fit(
+    X_train, ytr_cat,
+    validation_split=0.15,
+    epochs=CFG['epochs'],
+    batch_size=CFG['batch'],
+    class_weight=dict(enumerate(cw)),
+    callbacks=[EarlyStopping(patience=CFG['patience'],
+                             restore_best_weights=True)],
+    verbose=1)
 
-        # 1️⃣  Escalamos con stats del fold
-        scaler = StandardScaler().fit(X[tr])
-        Xtr = scaler.transform(X[tr])
-        Xv  = scaler.transform(X[te])
+# ---------------- evaluación ----------------
+y_pred = np.argmax(mlp.predict(X_test), 1)
+f1 = f1_score(y_test, y_pred, average='macro')
+print(f"► F1-macro hold-out: {f1:.3f}")
 
-        ytr, yv = ds.y[tr], ds.y[te]
-        ytr_cat = to_categorical(ytr, n_cls)
-        yv_cat  = to_categorical(yv,  n_cls)
+# ---------------- gráficas ----------------
+plt.figure(figsize=(5,4))
+plt.plot(hist.history['loss'], label='train'); plt.plot(hist.history['val_loss'], label='val')
+plt.title('Curva de pérdida'); plt.xlabel('Época'); plt.ylabel('Loss'); plt.legend(); plt.tight_layout()
+plt.show()
 
-        cw = compute_class_weight('balanced',
-                              classes=np.arange(n_cls), y=ytr)
-        mlp = build_mlp(X.shape[1], **cfg, n_cls=n_cls)
+plt.figure(figsize=(5,4))
+plt.plot(hist.history['accuracy'], label='train'); plt.plot(hist.history['val_accuracy'], label='val')
+plt.title('Exactitud'); plt.xlabel('Época'); plt.ylabel('Accuracy'); plt.legend(); plt.tight_layout()
+plt.show()
 
-        mlp.fit(Xtr, ytr_cat,
-                epochs=80, batch_size=32,
-                validation_data=(Xv, yv_cat),   # sin aleatoriedad
-                callbacks=[EarlyStopping(patience=8,
-                                        restore_best_weights=True)],
-                class_weight=dict(enumerate(cw)),
-                verbose=0)
+cm = confusion_matrix(y_test, y_pred, normalize='true')
+disp = ConfusionMatrixDisplay(cm, display_labels=enc.classes_)
+disp.plot(cmap='Blues', colorbar=False); plt.title('Matriz de confusión (normalizada)'); plt.tight_layout(); plt.show()
 
-        y_hat = np.argmax(mlp.predict(Xv, verbose=0), 1)
-        f1 = f1_score(yv, y_hat, average='macro')
-        scores.append(f1)
-        print(f"Fold{k}: F1={f1:.3f}")
-
-    print("MLP F1-macro =", np.mean(scores).round(3),
-        "±", np.std(scores).round(3))
-
-
-
-# ---------- MAIN ----------
-if __name__ == "__main__":
-    ROOT = r"D:\Documentos\Monitoreo-Comportamientos-Sospechosos\csv"
-    ds = VideoDataset(max_len=50); ds.load(ROOT)
-    cfg = dict(h1=128, h2=64, drop=0.3, lr=1e-3)
-    cv_mlp(ds, cfg)
+# ---------------- guardado ----------------
+mlp.save('mlp_trayectorias_final.h5')
+joblib.dump({'scaler': scaler, 'label_encoder': enc},
+            'preprocesamiento_agregados.pkl')
+print("Modelo y escalador guardados.")

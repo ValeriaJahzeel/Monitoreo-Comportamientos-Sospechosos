@@ -334,7 +334,7 @@ class SimpleVideoLSTMTrainer:
 
 
     
-    def train_lstm(self, epochs=200, batch_size=4, validation_split=0.2):
+    def train_lstm(self, epochs=200, batch_size=8, validation_split=0.2):
         """
         Entrena el modelo LSTM con mejoras.
         """
@@ -640,12 +640,13 @@ def main():
         print("\n🚀 Ejecutando SOLO Grid Search (no habrá entrenamiento por defecto)…")
 
         param_grid = {
-            'lstm_units_1': [32, 64],
-            'n_lstm_layers': [1],
-            'dense_units': [(64,), (64, 32)],
+            'lstm_units_1': [64],
+            'lstm_units_2': [32],
+            'n_lstm_layers': [1,2],
+            'dense_units': [(32,), (64, 32)],
             'dropout': [0.2, 0.3],
-            'learning_rate': [0.0005],
-            'batch_size': [4]
+            'learning_rate': [0.0001, 0.0005],
+            'batch_size': [4,8]
         }
 
         top_results = grid_search_lstm(
@@ -664,7 +665,7 @@ def main():
 
     else:
         print("\n🚀 Entrenamiento con hiperparámetros por defecto…")
-        history = trainer.train_lstm(epochs=100, validation_split=0.2)
+        history = trainer.train_lstm(epochs=200, validation_split=0.2)
 
     # 3. Evaluar y graficar
     trainer.evaluate_final()
