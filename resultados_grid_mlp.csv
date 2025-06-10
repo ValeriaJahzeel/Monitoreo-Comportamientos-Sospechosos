@@ -1,8 +1,0 @@
-config,mean_f1,std_f1
-"{'hidden_layer_sizes': (64, 32), 'activation': 'tanh', 'alpha': 0.0001}",0.48420501108471026,0.09360938489823853
-"{'hidden_layer_sizes': (8,), 'activation': 'relu', 'alpha': 0.01}",0.481077694235589,0.056520134277756984
-"{'hidden_layer_sizes': (16,), 'activation': 'tanh', 'alpha': 0.01}",0.47357940305308727,0.09477231318643871
-"{'hidden_layer_sizes': (24, 12), 'activation': 'tanh', 'alpha': 0.005}",0.4281498618340723,0.11584402535260206
-"{'hidden_layer_sizes': (32,), 'activation': 'relu', 'alpha': 0.001}",0.40410550370450116,0.09599443873372944
-"{'hidden_layer_sizes': (32, 16), 'activation': 'relu', 'alpha': 0.0005}",0.33851787021352236,0.03748972582436943
-"{'hidden_layer_sizes': (16, 8), 'activation': 'relu', 'alpha': 0.0005}",0.2078777189888301,0.014632662373760421

@@ -643,10 +643,10 @@ def main():
             'lstm_units_1': [64],
             'lstm_units_2': [32],
             'n_lstm_layers': [1,2],
-            'dense_units': [(32,), (64, 32)],
-            'dropout': [0.2, 0.3],
-            'learning_rate': [0.0001, 0.0005],
-            'batch_size': [4,8]
+            'dense_units': [(64, 32)],
+            'dropout': [0.2],
+            'learning_rate': [ 0.0005],
+            'batch_size': [8]
         }
 
         top_results = grid_search_lstm(
