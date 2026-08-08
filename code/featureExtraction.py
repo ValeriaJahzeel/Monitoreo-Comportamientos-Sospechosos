@@ -27,26 +27,6 @@ class FeatureExtractor:
         x1, y1, x2, y2 = bbox
         return (x1 + x2) // 2, (y1 + y2) // 2
     
-    def actualizar_centroides(self, bboxes):
-        """Actualiza centroides a partir de los bounding boxes detectados"""
-        centroides = {}
-        for key, bbox in bboxes.items():
-            centroides[key] = self.calcular_centroide(bbox)
-            
-            # Inicializar o actualizar historial de trayectoria
-            if key not in self.trayectorias:
-                self.trayectorias[key] = deque(maxlen=self.history_size)
-            
-            self.trayectorias[key].append(centroides[key])
-        
-        # Guardar para el siguiente frame (no sobreescribir resultado)
-        resultado = centroides.copy()  # Usar copy para evitar referencias cruzadas
-        
-        # Actualizar centroides anteriores para el próximo frame
-        self.centroides_anteriores = self.centroides_anteriores.copy()  # Preservar los anteriores
-        
-        return resultado
-    
     def calcular_metricas_movimiento(self, centroides, fps=25):
         """
         Calcula múltiples métricas de movimiento en un solo paso:
@@ -119,16 +99,20 @@ class FeatureExtractor:
                 
         return posturas
     
-    def calcular_densidad_movimiento(self, centroides):
-        """Calcula la densidad de movimiento normalizada en el frame"""
-        if not centroides or not self.frame_dimensiones:
+    def calcular_densidad_movimiento(self, desplazamientos):
+        """Calcula la densidad de movimiento normalizada en el frame.
+
+        `desplazamientos` es el diccionario de desplazamientos por objeto
+        (píxeles recorridos desde el frame anterior), no las posiciones.
+        """
+        if not desplazamientos or not self.frame_dimensiones:
             return 0.0
-            
+
         alto, ancho = self.frame_dimensiones
         area_total = alto * ancho
-        
-        # Usar vectorización para sumar todos los desplazamientos
-        sum_movement = sum(np.linalg.norm(np.array(centroides[k])) for k in centroides)
+
+        # Sumar los desplazamientos reales de todos los objetos
+        sum_movement = sum(desplazamientos.values())
         return sum_movement / area_total
     
     def calcular_flujo_optico(self, frame_anterior, frame_actual, bboxes, method='sparse'):
@@ -463,7 +447,7 @@ class FeatureExtractor:
                 "Velocidad": metricas['velocidad'].get(obj_id, 0),
                 "Aceleracion": metricas['aceleracion'].get(obj_id, 0),
                 "Direccion": metricas['direccion'].get(obj_id, 0),
-                "Densidad": self.calcular_densidad_movimiento(centroides),
+                "Densidad": self.calcular_densidad_movimiento(metricas['desplazamiento']),
                 "Postura": posturas.get(obj_id, "Desconocida"),
                 "Patron_Movimiento": trayectoria['patron'],
                 "Linealidad": trayectoria['linealidad'],

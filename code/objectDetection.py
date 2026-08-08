@@ -14,7 +14,13 @@ import math
 # self.tracker = Sort(max_age=30, min_hits=3, iou_threshold=0.3)
 
 class ObjectDetector:
-    def __init__(self, model_path=r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\yolo-Weights\yolov8n.pt'):
+    def __init__(self, model_path=None):
+        # Por defecto, usar los pesos que viven junto a este script
+        # (evita rutas absolutas atadas a la máquina de un desarrollador)
+        if model_path is None:
+            model_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), 'yolo-Weights', 'yolov8n.pt'
+            )
         # Inicializar modelo YOLO
         self.modelo = YOLO(model_path)
         # Inicializar extractor de características
@@ -390,7 +396,12 @@ class ObjectDetector:
         if flujo_data is not None and self.frame_anterior is not None:
             frame_flujo = self.visualizar_flujo_denso(frame_anotado, flujo_data)
             frame_anotado = frame_flujo
-        
+
+        # Purgar objetos que llevan tiempo sin detectarse (evita que
+        # objetos_previos y feature_extractor.trayectorias crezcan sin
+        # límite en videos largos)
+        self.limpiar_objetos_perdidos()
+
         # Actualizar para el próximo frame
         self.frame_anterior = frame_gris
         self.frame_num += 1
@@ -408,112 +419,129 @@ class ObjectDetector:
     def procesar_video(self, video_path, csv_path, mostrar=True, usar_threads=True):
         """Procesa un video completo con soporte para multi-threading"""
         import threading
-        from queue import Queue
-        
+        from queue import Queue, Empty
+
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"Error: No se pudo abrir el video {video_path}")
             return
-        
-        # Resetear variables
+
+        # Resetear variables. self.frame_num solo lo incrementa procesar_frame,
+        # que corre en el hilo de trabajo cuando usar_threads=True: no debe
+        # tocarse también desde el hilo principal (evita condición de carrera
+        # y doble conteo de frames).
         self.frame_num = 0
         self.frame_anterior = None
-        
-        # Cola para procesamiento en paralelo
+
+        def guardar_resultado(datos):
+            if datos:
+                self.guardar_caracteristicas(datos, csv_path)
+
         if usar_threads:
             cola_frames = Queue(maxsize=30)
             cola_resultados = Queue()
             evento_terminar = threading.Event()
-            
+
             # Función de procesamiento en hilo separado
             def procesar_cola():
-                while not evento_terminar.is_set() or not cola_frames.empty():
+                while True:
                     try:
-                        frame_data = cola_frames.get(timeout=1.0)
-                        idx, frame = frame_data
-                        
-                        # Procesar frame
-                        frame_anotado, datos = self.procesar_frame(frame)
-                        
-                        # Poner resultado en cola
-                        cola_resultados.put((idx, frame_anotado, datos))
-                        
-                        # Marcar tarea como completada
-                        cola_frames.task_done()
-                    except:
+                        idx, frame = cola_frames.get(timeout=1.0)
+                    except Empty:
+                        if evento_terminar.is_set():
+                            return
                         continue
-            
+
+                    frame_anotado, datos = self.procesar_frame(frame)
+                    cola_resultados.put((idx, frame_anotado, datos))
+                    cola_frames.task_done()
+
             # Iniciar hilo de procesamiento
             hilo_proc = threading.Thread(target=procesar_cola)
             hilo_proc.daemon = True
             hilo_proc.start()
-        
+
         print(f"Procesando video: {video_path}")
-        
+
+        # Índice local usado solo para encolar en orden; el contador real de
+        # frames (self.frame_num) lo mantiene procesar_frame.
+        indice_envio = 0
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-                
+
             if usar_threads:
                 # Poner frame en cola para procesar
-                cola_frames.put((self.frame_num, frame))
-                
-                # Obtener y mostrar resultados procesados si están listos
-                if not cola_resultados.empty():
-                    idx, frame_anotado, datos = cola_resultados.get()
-                    
-                    # Guardar datos
-                    if datos:
-                        self.guardar_caracteristicas(datos, csv_path)
-                    
+                cola_frames.put((indice_envio, frame))
+                indice_envio += 1
+
+                # Recoger todos los resultados que ya estén listos (antes solo
+                # se revisaba una vez por iteración, y el resto se perdía sin
+                # guardarse en el CSV)
+                while True:
+                    try:
+                        _, frame_anotado, datos = cola_resultados.get_nowait()
+                    except Empty:
+                        break
+                    guardar_resultado(datos)
+
                     # # Mostrar si es necesario
                     # if mostrar:
                     #     cv2.imshow("Análisis de Video", frame_anotado)
-                    #     if cv2.waitKey(1) & 0xFF == ord('q'): 
+                    #     if cv2.waitKey(1) & 0xFF == ord('q'):
                     #         break
             else:
                 # Procesamiento secuencial
                 frame_anotado, datos = self.procesar_frame(frame)
-                
-                # Guardar datos
-                if datos:
-                    self.guardar_caracteristicas(datos, csv_path)
-                
+                guardar_resultado(datos)
+
                 # # Mostrar si es necesario
                 # if mostrar:
                 #     cv2.imshow("Análisis de Video", frame_anotado)
-                #     if cv2.waitKey(1) & 0xFF == ord('q'): 
+                #     if cv2.waitKey(1) & 0xFF == ord('q'):
                 #         break
-            
-            self.frame_num += 1
-        
+
         # Limpiar
         if usar_threads:
-            evento_terminar.set()
+            # Esperar a que el hilo procese todo lo que quede en la cola
             cola_frames.join()
+            evento_terminar.set()
             hilo_proc.join()
-        
+
+            # Drenar cualquier resultado que haya quedado pendiente de guardar
+            while True:
+                try:
+                    _, frame_anotado, datos = cola_resultados.get_nowait()
+                except Empty:
+                    break
+                guardar_resultado(datos)
+
         cap.release()
         if mostrar:
             cv2.destroyAllWindows()
-        
+
         print(f"Procesamiento completado. Resultados guardados en {csv_path}")
 
 # Ejemplo de uso
 if __name__ == "__main__":
     detector = ObjectDetector()
-    
-    # video_path = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\dataset\sospechoso_reducido\1.mp4'
-    # csv_path = "./informacion/csv/sospechoso/1.csv"
-    # detector.procesar_video(video_path, csv_path)
-    
-    # varios videos
-    
+
     import glob
-    videos = glob.glob("./dataset/normal/*.mp4")
-    for video in videos:
-        nombre = os.path.basename(video).split('.')[0]
-        csv_path = f"./informacion/csv/normal/{nombre}.csv"
-        detector.procesar_video(video, csv_path)
+
+    # Directorio raíz del proyecto (este script vive en code/)
+    directorio_base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # Los CSV se guardan en un directorio plano con el nombre prefijado por la
+    # etiqueta ("normal_" / "sospechoso_"), que es la convención que espera
+    # VideoFrameDataset en model.py para asignar la clase de cada video.
+    for etiqueta in ("normal", "sospechoso"):
+        patron_videos = os.path.join(directorio_base, "dataset", etiqueta, "*.mp4")
+        for video in glob.glob(patron_videos):
+            nombre = os.path.basename(video).split('.')[0]
+            csv_path = os.path.join(
+                directorio_base, "informacion", "csv", f"{etiqueta}_{nombre}.csv"
+            )
+            detector.procesar_video(video, csv_path)
     

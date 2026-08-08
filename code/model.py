@@ -108,7 +108,7 @@ class VideoFrameDataset(Dataset):
                 # Limitar número de frames si se especifica
                 if max_frames is not None and len(features_array) > max_frames:
                     features_array = features_array[:max_frames]
-                
+
                 # Mapeo de etiquetas basado en prefijo del nombre del archivo
                 if filename.startswith('normal_'):
                     label = 0
@@ -119,40 +119,64 @@ class VideoFrameDataset(Dataset):
                 else:
                     logger.warning(f"Archivo {filename} ignorado - etiqueta no reconocida")
                     continue
-                
-                # Normalización de características del video
-                if normalize:
-                    scaler = StandardScaler()
-                    try:
-                        normalized_features = scaler.fit_transform(features_array)
-                    except Exception as e:
-                        logger.error(f"Error al normalizar {filename}: {str(e)}")
-                        continue
-                else:
-                    normalized_features = features_array
-                
-                # Convertir a tensor de PyTorch
-                video_tensor = torch.FloatTensor(normalized_features)
-                
+
+                # Guardar SIN normalizar todavía: normalizar aquí, por video,
+                # borraría la diferencia de escala de movimiento entre videos
+                # "tranquilos" y "erráticos", que es justo la señal que se
+                # quiere clasificar. La normalización real se hace después con
+                # fit_scaler(), ajustando un único StandardScaler global sobre
+                # el split de entrenamiento y aplicándolo a todos los videos.
+                video_tensor = torch.FloatTensor(features_array)
+
                 self.videos.append(video_tensor)
                 self.labels.append(label)
                 self.video_lengths.append(len(video_tensor))
-        
+
         # Verificar que se hayan cargado videos
         if not self.videos:
             raise ValueError("No se encontraron videos válidos. Verifica tus archivos CSV.")
-        
+
         elapsed_time = time.time() - start_time
         logger.info(f"Total de videos cargados: {len(self.videos)} en {elapsed_time:.2f} segundos")
         logger.info(f"Videos normales: {normal_count}")
         logger.info(f"Videos sospechosos: {suspicious_count}")
         logger.info(f"Longitudes de videos - Min: {min(self.video_lengths)}, Max: {max(self.video_lengths)}, Promedio: {np.mean(self.video_lengths):.2f}")
-        
+
         # Calcular dimensiones para realizar validaciones
         if len(self.videos) > 0:
             self.input_dim = self.videos[0].shape[1]
             logger.info(f"Dimensión de características: {self.input_dim}")
-    
+
+        self.normalize = normalize
+        self.scaler = None
+
+    def fit_scaler(self, train_indices):
+        """
+        Ajusta un StandardScaler global usando solo los videos en
+        `train_indices` y lo aplica a TODOS los videos del dataset
+        (entrenamiento y validación), reemplazando self.videos en el lugar.
+
+        Debe llamarse una sola vez, después de dividir en train/val y antes
+        de empezar a entrenar. El scaler ajustado queda en self.scaler para
+        poder guardarlo junto con el modelo y reutilizarlo en inferencia.
+        """
+        if not self.normalize:
+            return
+
+        train_features = np.concatenate(
+            [self.videos[i].numpy() for i in train_indices], axis=0
+        )
+
+        self.scaler = StandardScaler()
+        self.scaler.fit(train_features)
+
+        for i in range(len(self.videos)):
+            normalized = self.scaler.transform(self.videos[i].numpy())
+            self.videos[i] = torch.FloatTensor(normalized)
+
+        # Los tensores cambiaron: cualquier caché previa quedó obsoleta
+        self.data_cache = {}
+
     def __len__(self):
         return len(self.videos)
     
@@ -400,7 +424,12 @@ def train_video_classifier(csv_dir,
     train_indices, val_indices = train_test_split(
         range(len(dataset)), test_size=0.2, stratify=stratify, random_state=42
     )
-    
+
+    # Ajustar la normalización SOLO con el split de entrenamiento y aplicarla
+    # a todo el dataset (evita fugas de información del set de validación y
+    # evita que cada video se normalice con su propia media/desviación)
+    dataset.fit_scaler(train_indices)
+
     # Crear subconjuntos
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     val_dataset = torch.utils.data.Subset(dataset, val_indices)
@@ -551,6 +580,11 @@ def train_video_classifier(csv_dir,
                 'num_layers': num_layers if model_type.lower() == 'lstm' else None,
                 'hidden_layers': hidden_layers if model_type.lower() == 'mlp' else None,
                 'bidirectional': bidirectional if model_type.lower() == 'lstm' else None,
+                # Se guarda la media/desviación del scaler ajustado en
+                # entrenamiento para poder normalizar los videos nuevos de la
+                # misma forma en inferencia (ver load_scaler_from_checkpoint)
+                'scaler_mean': dataset.scaler.mean_ if dataset.scaler is not None else None,
+                'scaler_scale': dataset.scaler.scale_ if dataset.scaler is not None else None,
             }, model_filename)
             
             logger.info(f"Modelo guardado en {model_filename}")
@@ -791,12 +825,37 @@ def load_best_model(model_path, device=None):
     
     # Cargar estado del modelo
     model.load_state_dict(checkpoint['model_state_dict'])
-    
+
     return model, checkpoint
 
-def predict_video(model, video_path, selected_features=None, max_frames=None, device=None):
+def load_scaler_from_checkpoint(checkpoint):
     """
-    Predecir la clase de un nuevo video
+    Reconstruye el StandardScaler ajustado durante el entrenamiento a partir
+    de la media/desviación guardadas en el checkpoint. Devuelve None si el
+    checkpoint no incluye esa información (por ejemplo, modelos guardados
+    antes de este cambio).
+    """
+    mean = checkpoint.get('scaler_mean')
+    scale = checkpoint.get('scaler_scale')
+    if mean is None or scale is None:
+        return None
+
+    scaler = StandardScaler()
+    scaler.mean_ = mean
+    scaler.scale_ = scale
+    scaler.var_ = scale ** 2
+    scaler.n_features_in_ = len(mean)
+    return scaler
+
+def predict_video(model, video_path, selected_features=None, max_frames=None, device=None, scaler=None):
+    """
+    Predecir la clase de un nuevo video.
+
+    `scaler` debe ser el StandardScaler ajustado durante el entrenamiento
+    (ver load_scaler_from_checkpoint). Si no se provee, se usa un scaler
+    ajustado únicamente con este video como método de respaldo, pero eso
+    normaliza el video de forma distinta a como se entrenó el modelo y puede
+    dar predicciones poco confiables.
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -832,10 +891,18 @@ def predict_video(model, video_path, selected_features=None, max_frames=None, de
         if max_frames is not None and len(features_array) > max_frames:
             features_array = features_array[:max_frames]
         
-        # Normalizar
-        scaler = StandardScaler()
-        normalized_features = scaler.fit_transform(features_array)
-        
+        # Normalizar con el scaler del entrenamiento si está disponible;
+        # si no, ajustar uno solo con este video como respaldo
+        if scaler is not None:
+            normalized_features = scaler.transform(features_array)
+        else:
+            logger.warning(
+                "predict_video sin scaler de entrenamiento: normalizando solo "
+                "con este video, la predicción puede ser poco confiable"
+            )
+            fallback_scaler = StandardScaler()
+            normalized_features = fallback_scaler.fit_transform(features_array)
+
         # Convertir a tensor
         video_tensor = torch.FloatTensor(normalized_features).unsqueeze(0)  # Añadir dimensión de lote
         
@@ -875,18 +942,23 @@ def predict_video(model, video_path, selected_features=None, max_frames=None, de
         logger.error(f"Error al procesar el video {video_path}: {str(e)}")
         raise
 
-def ensemble_prediction(models, video_path, selected_features=None, max_frames=None, device=None):
+def ensemble_prediction(model_checkpoints, video_path, selected_features=None, max_frames=None, device=None):
     """
-    Realizar predicción con conjunto de modelos
+    Realizar predicción con conjunto de modelos.
+
+    `model_checkpoints` es una lista de tuplas (model, checkpoint), donde
+    `checkpoint` es el diccionario devuelto por load_best_model para ese
+    modelo (se usa para recuperar el scaler con el que se entrenó cada uno).
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+
     # Obtener predicciones individuales
     predictions = []
-    for model in models:
+    for model, checkpoint in model_checkpoints:
         try:
-            pred = predict_video(model, video_path, selected_features, max_frames, device)
+            scaler = load_scaler_from_checkpoint(checkpoint)
+            pred = predict_video(model, video_path, selected_features, max_frames, device, scaler)
             predictions.append(pred)
         except Exception as e:
             logger.error(f"Error en predicción de modelo: {str(e)}")
@@ -915,14 +987,12 @@ def ensemble_prediction(models, video_path, selected_features=None, max_frames=N
     }
 
 if __name__ == '__main__':
-    # Directorio con archivos CSV de videos
-    csv_directory = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\nuevoDatasetCSV'
-    
-    # Verificar que el directorio existe
-    if not os.path.exists(csv_directory):
-        logger.error(f"El directorio {csv_directory} no existe")
-        exit(1)
-    
+    # Directorio por defecto con archivos CSV de videos (relativo a la raíz
+    # del proyecto; este script vive en code/)
+    default_csv_directory = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'nuevoDatasetCSV'
+    )
+
     # python script.py --mode train --model_type mlp
     import argparse
     parser = argparse.ArgumentParser(description='Entrenamiento y evaluación de clasificador de videos')
@@ -930,11 +1000,18 @@ if __name__ == '__main__':
                        help='Modo de operación')
     parser.add_argument('--model_type', type=str, choices=['lstm', 'mlp'], default='lstm',
                        help='Tipo de modelo para entrenamiento')
+    parser.add_argument('--csv_dir', type=str, default=default_csv_directory,
+                       help='Directorio con archivos CSV de videos para entrenamiento/grid search')
     parser.add_argument('--video_path', type=str, help='Ruta al archivo CSV para predicción')
     parser.add_argument('--model_path', type=str, help='Ruta al modelo guardado para predicción')
-    
+
     args = parser.parse_args()
-    
+    csv_directory = args.csv_dir
+
+    if args.mode in ('train', 'grid_search') and not os.path.exists(csv_directory):
+        logger.error(f"El directorio {csv_directory} no existe")
+        exit(1)
+
     if args.mode == 'train':
         logger.info(f"Entrenando modelo {args.model_type}...")
         
@@ -998,8 +1075,9 @@ if __name__ == '__main__':
             exit(1)
         
         logger.info(f"Prediciendo clase para {args.video_path}...")
-        model, _ = load_best_model(args.model_path)
-        result = predict_video(model, args.video_path)
+        model, checkpoint = load_best_model(args.model_path)
+        scaler = load_scaler_from_checkpoint(checkpoint)
+        result = predict_video(model, args.video_path, scaler=scaler)
         
         logger.info(f"Predicción: {result['predicted_label']}")
         logger.info(f"Confianza: {result['confidence']:.2f}%")

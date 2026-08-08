@@ -88,8 +88,10 @@ def procesar_directorio(dir_entrada, dir_salida):
 
 # Ejemplo de uso
 if __name__ == "__main__":
-    dir_entrada = "D:\Documentos\Monitoreo-Comportamientos-Sospechosos\datasetCSV"  # Reemplaza con la ruta a tus archivos CSV
-    dir_salida = r'D:\Documentos\Monitoreo-Comportamientos-Sospechosos\nuevoDatasetCSV'  # Reemplaza con la ruta donde quieres guardar los archivos reducidos
+    # Rutas relativas a la raíz del proyecto (este script vive en code/)
+    directorio_base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dir_entrada = os.path.join(directorio_base, "datasetCSV")  # Reemplaza con la ruta a tus archivos CSV
+    dir_salida = os.path.join(directorio_base, "nuevoDatasetCSV")  # Reemplaza con la ruta donde quieres guardar los archivos reducidos
     
     # También puedes procesar un solo archivo
     # archivo_entrada = "ruta/a/tu/archivo.csv"

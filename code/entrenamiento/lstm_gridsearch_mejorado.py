@@ -258,7 +258,7 @@ class SimpleVideoLSTMTrainer:
                 stratify=y_encoded, random_state=self.random_state
             )
             print(f"   ✅ División estratificada")
-        except:
+        except ValueError:
             X_train, X_test, y_train, y_test = train_test_split(
                 self.sequences, y_encoded, test_size=test_size,
                 random_state=self.random_state

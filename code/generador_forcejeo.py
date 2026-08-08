@@ -1,3 +1,25 @@
+"""
+⚠️ DATOS SINTÉTICOS — NO son extraídos de video real ⚠️
+
+Este módulo NO analiza video. Genera filas de CSV con la misma estructura
+que produce featureExtraction.py, pero los valores (trayectorias, velocidad,
+linealidad, ciclicidad, etc.) se generan por muestreo estadístico
+(distribuciones normal/exponencial/gamma/beta) con una semilla fija, no a
+partir de comportamiento real de merodeo observado en cámara.
+
+Antes de usar generate_all_datasets() para ampliar el set de entrenamiento,
+ten en cuenta que:
+- El modelo puede terminar aprendiendo las asunciones estadísticas de este
+  generador en lugar de patrones reales de comportamiento sospechoso.
+- Cualquier archivo *_procesado.csv generado aquí debe quedar identificado
+  como sintético (por nombre de archivo o en un registro aparte) y nunca
+  mezclarse sin marcar con el set de validación/test, para no inflar las
+  métricas de forma artificial.
+- Si el protocolo del TT no contempla explícitamente aumentación de datos
+  sintética, conviene confirmarlo antes de reportar métricas entrenadas con
+  estos archivos.
+"""
+
 import pandas as pd
 import numpy as np
 import random
