@@ -67,6 +67,8 @@ code/entrenamiento/results_enhanced/
 Monitoreo-Comportamientos-Sospechosos-backup/
 archive/
 videos_mejorados/
+*.tmp
+~$*
 
 # IDE y editores
 .vscode/
