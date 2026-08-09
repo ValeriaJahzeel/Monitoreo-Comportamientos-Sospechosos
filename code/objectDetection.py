@@ -5,13 +5,10 @@ Versión optimizada que aprovecha FeatureExtractor.
 import cv2
 import numpy as np
 import os
+import torch
 from ultralytics import YOLO
 import featureExtraction as fe
-import math
-# from sort.sort import Sort
-
-# En la inicialización
-# self.tracker = Sort(max_age=30, min_hits=3, iou_threshold=0.3)
+from tracking import Sort
 
 class ObjectDetector:
     def __init__(self, model_path=None):
@@ -21,95 +18,55 @@ class ObjectDetector:
             model_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), 'yolo-Weights', 'yolov8n.pt'
             )
-        # Inicializar modelo YOLO
+        # Inicializar modelo YOLO. Se fija el device explícitamente (en vez
+        # de dejar que ultralytics lo infiera) para garantizar que use GPU
+        # cuando esté disponible.
         self.modelo = YOLO(model_path)
+        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         # Inicializar extractor de características
         self.feature_extractor = fe.FeatureExtractor(history_size=30)
+        # Tracker multi-objeto (Kalman + asociación por IoU). max_age=15
+        # tolera hasta ~0.5s de oclusión/detección perdida a 30fps antes de
+        # abandonar un track; min_hits=1 reporta un objeto desde la primera
+        # vez que se ve, igual que el tracker anterior.
+        self.tracker = Sort(max_age=15, min_hits=1, iou_threshold=0.3)
         # Variables para seguimiento
         self.frame_anterior = None
         self.frame_num = 0
         self.objetos_previos = {}
-        self.siguiente_id = 0
-    
+
     def detectar_objetos(self, frame):
         """Detecta objetos usando YOLO y retorna los bounding boxes con IDs consistentes"""
-        resultados = self.modelo(frame, stream=True)
+        # classes=[0] restringe la detección a "person" (COCO). Sin este
+        # filtro YOLO detecta y trackea las 80 clases de COCO (sillas,
+        # autos, botellas...) como si fueran personas, generando decenas de
+        # IDs espurios por video. Se deja el confidence threshold en el
+        # default de ultralytics (0.25): subirlo (probado en 0.4) reducía
+        # aún más el ruido pero perdía casi todas las detecciones en clips
+        # con personas lejos de cámara (típico en merodeo).
+        resultados = self.modelo(frame, stream=True, classes=[0], verbose=False, device=self.device)
         detecciones = []
-        
+
         for r in resultados:
             for box in r.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                conf = float(box.conf[0])
-                cls = int(box.cls[0])
-                # Calcular el centroide
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                detecciones.append((x1, y1, x2, y2, cx, cy, conf, cls))
-        
-        # Asignar IDs consistentes
-        bboxes = {}
-        
-        # Establecer umbral de distancia para considerar que es el mismo objeto
-        umbral_distancia = 50
-        
-        # Inicializar variables de seguimiento si no existen
-        if not hasattr(self, 'objetos_previos'):
-            self.objetos_previos = {}
-            self.siguiente_id = 0
-        
-        # Inicializar conjuntos de asignación
-        objetos_asignados = set()
-        ids_asignados = set()
-        
-        # Matriz de costos para asociación - solo si hay objetos previos y detecciones actuales
-        if self.objetos_previos and detecciones:
-            objetos_anteriores = list(self.objetos_previos.items())
-            
-            # Calcular todas las distancias entre objetos previos y actuales
-            matriz_distancias = np.zeros((len(objetos_anteriores), len(detecciones)))
-            
-            for i, (id_prev, (_, _, _, _, cx_prev, cy_prev)) in enumerate(objetos_anteriores):
-                for j, (x1, y1, x2, y2, cx, cy, _, _) in enumerate(detecciones):
-                    # Distancia euclídea entre centroides
-                    dist = np.sqrt((cx - cx_prev)**2 + (cy - cy_prev)**2)
-                    matriz_distancias[i, j] = dist
-            
-            # Ordenar todas las distancias de menor a mayor
-            indices_planos = np.argsort(matriz_distancias.flatten())
-            indices_2d = np.unravel_index(indices_planos, matriz_distancias.shape)
-            
-            for idx_prev, idx_det in zip(indices_2d[0], indices_2d[1]):
-                # Si ya se asignó este objeto o detección, continuar
-                if idx_prev in ids_asignados or idx_det in objetos_asignados:
-                    continue
-                    
-                # Si la distancia es mayor que el umbral, no asignar
-                if matriz_distancias[idx_prev, idx_det] > umbral_distancia:
-                    continue
-                    
-                # Asignar ID
-                id_obj = objetos_anteriores[idx_prev][0]
-                x1, y1, x2, y2 = detecciones[idx_det][:4]
-                bboxes[id_obj] = (x1, y1, x2, y2)
-                
-                # Marcar como asignados
-                ids_asignados.add(idx_prev)
-                objetos_asignados.add(idx_det)
-        
-        # Crear nuevos IDs para objetos no asignados
-        for i, deteccion in enumerate(detecciones):
-            if i not in objetos_asignados:
-                id_nuevo = f"obj_{self.siguiente_id}"
-                self.siguiente_id += 1
-                x1, y1, x2, y2 = deteccion[:4]
-                bboxes[id_nuevo] = (x1, y1, x2, y2)
-        
-        # Actualizar objetos previos para el siguiente frame
+                detecciones.append((x1, y1, x2, y2))
+
+        detecciones_array = np.array(detecciones, dtype=float) if detecciones else np.empty((0, 4))
+
+        # El tracker asocia estas detecciones con los tracks existentes
+        # (Kalman + IoU) y devuelve IDs consistentes entre frames, incluso
+        # si el objeto no se detectó en uno o varios frames intermedios.
+        bboxes = self.tracker.update(detecciones_array)
+
+        # Se preserva self.objetos_previos porque limpiar_objetos_perdidos()
+        # y predecir_posicion() lo usan para saber qué IDs siguen activos
         self.objetos_previos = {}
         for obj_id, bbox in bboxes.items():
             x1, y1, x2, y2 = bbox
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
             self.objetos_previos[obj_id] = (x1, y1, x2, y2, cx, cy)
-        
+
         return bboxes
     
     def determinar_roi_flujo(self, flujo, umbral=1.0, densidad_min=10, filtro_tamano=5, min_area=500):
@@ -201,6 +158,8 @@ class ObjectDetector:
                 del self.ultimo_frame_visto[obj_id]
             if obj_id in self.feature_extractor.trayectorias:
                 del self.feature_extractor.trayectorias[obj_id]
+            if obj_id in self.feature_extractor.contador_permanencia:
+                del self.feature_extractor.contador_permanencia[obj_id]
             
     def analizar_velocidad_sospechosa(self, historial_velocidades, umbral_varianza=10.0):
         """
@@ -322,24 +281,32 @@ class ObjectDetector:
         
         return True
     
-    def procesar_frame(self, frame):
-        """Procesa un frame individual y devuelve resultados de análisis"""
+    def procesar_frame(self, frame, dibujar=True):
+        """Procesa un frame individual y devuelve resultados de análisis.
+
+        `dibujar` controla si se generan las anotaciones visuales (cajas,
+        IDs, trayectorias, flechas de flujo óptico). En procesamiento por
+        lotes (sin mostrar/guardar video) se debe dejar en False: evita
+        dibujar sobre cada frame y, sobre todo, evita calcular el flujo
+        óptico denso (Farneback sobre el frame completo, la operación más
+        costosa de todo el pipeline) salvo en el único caso en que
+        realmente se usa: como respaldo cuando YOLO no detectó a nadie.
+        """
         # Convertir a escala de grises para flujo óptico
         frame_gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         self.feature_extractor.update_frame_dimensions(frame.shape[:2])
-        
-        # Inicializar flujo y frame anotado
-        flujo_data = None
-        frame_anotado = frame.copy()
-        
-        # Calcular flujo óptico si hay frame anterior
-        if self.frame_anterior is not None:
-            # Calcular flujo óptico denso directamente
-            flujo_data = self.calcular_flujo_optico_denso(self.frame_anterior, frame_gris)
-        
-        # Detectar objetos con YOLO
+
+        frame_anotado = frame.copy() if dibujar else None
+
+        # Detectar objetos con YOLO primero
         bboxes = self.detectar_objetos(frame)
-        
+
+        # El flujo óptico denso solo se necesita si YOLO no encontró a
+        # nadie (respaldo) o si hay que dibujarlo para visualización
+        flujo_data = None
+        if (not bboxes or dibujar) and self.frame_anterior is not None:
+            flujo_data = self.calcular_flujo_optico_denso(self.frame_anterior, frame_gris)
+
         # Si no se detectaron objetos pero hay flujo, determinar ROI
         if not bboxes and flujo_data is not None:
             roi = self.determinar_roi_flujo(flujo_data, 
@@ -360,42 +327,43 @@ class ObjectDetector:
                 if es_valido:
                     # Crear un bounding box "virtual" para la región con movimiento
                     bboxes["movimiento_0"] = (x_min, y_min, x_max, y_max)
-                    cv2.rectangle(frame_anotado, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-                    cv2.putText(frame_anotado, "Movimiento detectado", (x_min, y_min-10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        
+                    if dibujar:
+                        cv2.rectangle(frame_anotado, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                        cv2.putText(frame_anotado, "Movimiento detectado", (x_min, y_min-10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
         # Recolectar todas las características disponibles
         datos_caracteristicas = self.feature_extractor.recolectar_caracteristicas(
             self.frame_num, bboxes, fps=25
         )
-        
-        # Visualizar objetos detectados y sus trayectorias
-        for obj_id, bbox in bboxes.items():
-            x1, y1, x2, y2 = bbox
-            # Dibujar bounding box
-            cv2.rectangle(frame_anotado, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            
-            # Dibujar ID y datos
-            centroide = self.feature_extractor.calcular_centroide(bbox)
-            cv2.circle(frame_anotado, centroide, 4, (0, 0, 255), -1)
-            cv2.putText(frame_anotado, f"ID: {obj_id}", (x1, y1-10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-            
-            # Dibujar trayectoria si existe
-            if obj_id in self.feature_extractor.trayectorias:
-                trayectoria = list(self.feature_extractor.trayectorias[obj_id])
-                if len(trayectoria) > 1:
-                    # Convertir puntos de la trayectoria
-                    puntos = np.array(trayectoria, dtype=np.int32)
-                    # Dibujar línea de trayectoria
-                    for i in range(1, len(puntos)):
-                        cv2.line(frame_anotado, tuple(puntos[i-1]), 
-                            tuple(puntos[i]), (0, 255, 255), 2)
-        
-        # Visualizar flujo óptico
-        if flujo_data is not None and self.frame_anterior is not None:
-            frame_flujo = self.visualizar_flujo_denso(frame_anotado, flujo_data)
-            frame_anotado = frame_flujo
+
+        if dibujar:
+            # Visualizar objetos detectados y sus trayectorias
+            for obj_id, bbox in bboxes.items():
+                x1, y1, x2, y2 = bbox
+                # Dibujar bounding box
+                cv2.rectangle(frame_anotado, (x1, y1), (x2, y2), (255, 0, 0), 2)
+
+                # Dibujar ID y datos
+                centroide = self.feature_extractor.calcular_centroide(bbox)
+                cv2.circle(frame_anotado, centroide, 4, (0, 0, 255), -1)
+                cv2.putText(frame_anotado, f"ID: {obj_id}", (x1, y1-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+                # Dibujar trayectoria si existe
+                if obj_id in self.feature_extractor.trayectorias:
+                    trayectoria = list(self.feature_extractor.trayectorias[obj_id])
+                    if len(trayectoria) > 1:
+                        # Convertir puntos de la trayectoria
+                        puntos = np.array(trayectoria, dtype=np.int32)
+                        # Dibujar línea de trayectoria
+                        for i in range(1, len(puntos)):
+                            cv2.line(frame_anotado, tuple(puntos[i-1]),
+                                tuple(puntos[i]), (0, 255, 255), 2)
+
+            # Visualizar flujo óptico
+            if flujo_data is not None and self.frame_anterior is not None:
+                frame_anotado = self.visualizar_flujo_denso(frame_anotado, flujo_data)
 
         # Purgar objetos que llevan tiempo sin detectarse (evita que
         # objetos_previos y feature_extractor.trayectorias crezcan sin
@@ -416,8 +384,13 @@ class ObjectDetector:
         # Usar la función del extractor para guardar
         self.feature_extractor.guardar_datos_csv(csv_path, datos)
     
-    def procesar_video(self, video_path, csv_path, mostrar=True, usar_threads=True):
-        """Procesa un video completo con soporte para multi-threading"""
+    def procesar_video(self, video_path, csv_path, mostrar=True, usar_threads=True, guardar_video=None):
+        """Procesa un video completo con soporte para multi-threading.
+
+        `guardar_video`: ruta opcional donde escribir el video anotado
+        (cajas, IDs, trayectorias). Si se especifica, fuerza dibujar=True
+        aunque `mostrar` sea False.
+        """
         import threading
         from queue import Queue, Empty
 
@@ -432,10 +405,29 @@ class ObjectDetector:
         # y doble conteo de frames).
         self.frame_num = 0
         self.frame_anterior = None
+        # Tracker nuevo por video: si se reutiliza el mismo ObjectDetector
+        # para varios videos (como hace el bloque __main__), los tracks del
+        # video anterior no deben poder "engancharse" a detecciones del
+        # video siguiente.
+        self.tracker = Sort(max_age=self.tracker.max_age, min_hits=self.tracker.min_hits,
+                             iou_threshold=self.tracker.iou_threshold)
 
-        def guardar_resultado(datos):
+        video_writer = None
+        if guardar_video:
+            mostrar = True  # sin dibujar=True no hay nada que escribir
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25
+            ancho = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            alto = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            os.makedirs(os.path.dirname(os.path.abspath(guardar_video)), exist_ok=True)
+            video_writer = cv2.VideoWriter(
+                guardar_video, cv2.VideoWriter_fourcc(*'mp4v'), fps, (ancho, alto)
+            )
+
+        def guardar_resultado(datos, frame_anotado=None):
             if datos:
                 self.guardar_caracteristicas(datos, csv_path)
+            if video_writer is not None and frame_anotado is not None:
+                video_writer.write(frame_anotado)
 
         if usar_threads:
             cola_frames = Queue(maxsize=30)
@@ -452,7 +444,7 @@ class ObjectDetector:
                             return
                         continue
 
-                    frame_anotado, datos = self.procesar_frame(frame)
+                    frame_anotado, datos = self.procesar_frame(frame, dibujar=mostrar)
                     cola_resultados.put((idx, frame_anotado, datos))
                     cola_frames.task_done()
 
@@ -485,7 +477,7 @@ class ObjectDetector:
                         _, frame_anotado, datos = cola_resultados.get_nowait()
                     except Empty:
                         break
-                    guardar_resultado(datos)
+                    guardar_resultado(datos, frame_anotado)
 
                     # # Mostrar si es necesario
                     # if mostrar:
@@ -494,8 +486,8 @@ class ObjectDetector:
                     #         break
             else:
                 # Procesamiento secuencial
-                frame_anotado, datos = self.procesar_frame(frame)
-                guardar_resultado(datos)
+                frame_anotado, datos = self.procesar_frame(frame, dibujar=mostrar)
+                guardar_resultado(datos, frame_anotado)
 
                 # # Mostrar si es necesario
                 # if mostrar:
@@ -516,13 +508,17 @@ class ObjectDetector:
                     _, frame_anotado, datos = cola_resultados.get_nowait()
                 except Empty:
                     break
-                guardar_resultado(datos)
+                guardar_resultado(datos, frame_anotado)
 
         cap.release()
+        if video_writer is not None:
+            video_writer.release()
         if mostrar:
             cv2.destroyAllWindows()
 
         print(f"Procesamiento completado. Resultados guardados en {csv_path}")
+        if guardar_video:
+            print(f"Video anotado guardado en {guardar_video}")
 
 # Ejemplo de uso
 if __name__ == "__main__":

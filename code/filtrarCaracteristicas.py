@@ -22,6 +22,7 @@ def extraer_caracteristicas_relevantes(ruta_entrada, ruta_salida):
         'Circularidad',
         'Zigzag',
         'Area_Trayectoria',
+        'Tiempo_Permanencia',
         # Características categóricas importantes
         'Patron_Movimiento',
         'Postura',

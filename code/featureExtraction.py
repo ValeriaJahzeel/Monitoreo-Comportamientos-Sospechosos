@@ -17,6 +17,7 @@ class FeatureExtractor:
         self.centroides_anteriores = {}
         self.velocidades_anteriores = {}
         self.frame_dimensiones = None
+        self.contador_permanencia = {}  # Frames consecutivos que un objeto lleva casi sin moverse
     
     def update_frame_dimensions(self, dimensions):
         """Actualiza las dimensiones del frame actual para cálculos relativos"""
@@ -340,10 +341,20 @@ class FeatureExtractor:
         # Calcular autocorrelación para detectar patrones repetitivos
         autocorr_x = np.correlate(x - np.mean(x), x - np.mean(x), mode='full')
         autocorr_y = np.correlate(y - np.mean(y), y - np.mean(y), mode='full')
-        
-        # Normalizar
-        autocorr_x = autocorr_x[len(autocorr_x)//2:] / autocorr_x[len(autocorr_x)//2]
-        autocorr_y = autocorr_y[len(autocorr_y)//2:] / autocorr_y[len(autocorr_y)//2]
+        autocorr_x = autocorr_x[len(autocorr_x)//2:]
+        autocorr_y = autocorr_y[len(autocorr_y)//2:]
+
+        # Normalizar (si la coordenada no varía en la ventana, la
+        # autocorrelación de lag 0 es 0 y no hay ciclicidad que medir)
+        if autocorr_x[0] > 0:
+            autocorr_x = autocorr_x / autocorr_x[0]
+        else:
+            autocorr_x = np.zeros_like(autocorr_x)
+
+        if autocorr_y[0] > 0:
+            autocorr_y = autocorr_y / autocorr_y[0]
+        else:
+            autocorr_y = np.zeros_like(autocorr_y)
         
         # Buscar picos en la autocorrelación
         # (los picos indican periodicidad/ciclicidad)
@@ -399,7 +410,26 @@ class FeatureExtractor:
         area = cv2.contourArea(hull)
         
         return area
-    
+
+    def calcular_tiempo_permanencia(self, objeto_id, desplazamiento, umbral_estatico=5.0):
+        """
+        Cuenta frames consecutivos en los que un objeto se ha quedado
+        prácticamente quieto (desplazamiento menor a `umbral_estatico`
+        píxeles), como proxy de "dwell time"/tiempo de merodeo sin depender
+        de conocer dónde está la puerta/ventana en la escena: un objeto que
+        se mueve poco durante muchos frames seguidos es justamente el
+        patrón de merodeo, independientemente del punto exacto donde ocurra.
+
+        Se reinicia el contador en cuanto el objeto vuelve a moverse más
+        que el umbral.
+        """
+        if desplazamiento is None or desplazamiento > umbral_estatico:
+            self.contador_permanencia[objeto_id] = 0
+        else:
+            self.contador_permanencia[objeto_id] = self.contador_permanencia.get(objeto_id, 0) + 1
+
+        return self.contador_permanencia[objeto_id]
+
     def recolectar_caracteristicas(self, frame_num, bboxes, fps=25):
         """
         Recolecta todas las características para el frame actual y objetos detectados
@@ -436,7 +466,13 @@ class FeatureExtractor:
             
             # Área de casco convexo (dispersión)
             area_hull = self.calcular_area_convex_hull(obj_id)
-            
+
+            # Tiempo de permanencia (dwell time): frames consecutivos casi
+            # sin moverse, como proxy de merodeo
+            tiempo_permanencia = self.calcular_tiempo_permanencia(
+                obj_id, metricas['desplazamiento'].get(obj_id)
+            )
+
             # Combinar todas las características
             datos_obj = {
                 "Frame": frame_num,
@@ -457,7 +493,8 @@ class FeatureExtractor:
                 "Frecuencia_Ciclo": ciclico['frecuencia'],
                 "Amplitud_Ciclo": ciclico['amplitud'],
                 "Area_Trayectoria": area_hull,
-                "En_Interaccion": 1 if any(obj_id in par for par in interacciones) else 0
+                "En_Interaccion": 1 if any(obj_id in par for par in interacciones) else 0,
+                "Tiempo_Permanencia": tiempo_permanencia
             }
             
             datos_frame.append(datos_obj)
@@ -474,7 +511,8 @@ class FeatureExtractor:
             "Desplazamiento", "Velocidad", "Aceleracion", "Direccion",
             "Densidad", "Postura", "Patron_Movimiento", "Linealidad",
             "Circularidad", "Zigzag", "Es_Ciclico", "Frecuencia_Ciclo",
-            "Amplitud_Ciclo", "Area_Trayectoria", "En_Interaccion"
+            "Amplitud_Ciclo", "Area_Trayectoria", "En_Interaccion",
+            "Tiempo_Permanencia"
         ]
         
         # Verificar si el archivo ya existe
