@@ -29,17 +29,17 @@ comportamientos_env/
 comportamientos_env_gpu/
 entornoTT/
 
-# Modelos y resultados grandes (solo subir los finales)
+# Modelos y resultados grandes (ningún checkpoint se sube; se regeneran
+# entrenando localmente, ver README)
 *.h5
 *.pkl
 *.pth
-!lstm_v3_final.h5
-!lstm_v3_completo.pkl
-!best.weights.h5
+*.pt
 
 # YOLO y detección
 runs/
 yolo-Weights/
+YOLOv8_train/
 HandDetection/
 Hands/
 
@@ -55,6 +55,7 @@ csv/
 
 # Resultados y análisis
 resultados/
+resultados_mlp/
 data_information/
 informacion/
 .informacion/
@@ -87,9 +88,13 @@ Thumbs.db
 
 # Documentos (solo código en GitHub)
 *.pdf
+*.doc
 *.docx
 *.pptx
 *.xlsx
+
+# Notas personales
+links.txt
 
 # Archivos comprimidos
 *.zip
