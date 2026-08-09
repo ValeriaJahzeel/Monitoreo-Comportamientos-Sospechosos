@@ -181,6 +181,15 @@ Monitoreo-Comportamientos-Sospechosos/
 
 ---
 
+## 🗺️ Roadmap
+
+The long-term goal of this project is a model light enough to run on **cheap, non-specialized home security cameras with no GPU**, usable by anyone rather than a security team with dedicated hardware — and flexible enough to be **retrained for other kinds of suspicious behavior**, not just loitering/forced entry. Where things stand against that goal, and what's next:
+
+- **Lightweight inference is already mostly there.** The winning models (Random Forest / Gradient Boosting) are cheap at inference time — no GPU, milliseconds per prediction, a few MB on disk. The real bottleneck for genuinely low-power hardware is **YOLOv8n + the Python/PyTorch runtime** for the detection step. Next step: export the detector to an edge format (ONNX / TFLite, INT8 quantized) or evaluate an even smaller person-detector, and benchmark on hardware closer to what a real home camera uses.
+- **Generalizing beyond merodeo/forcejeo.** The current system is a *supervised* classifier — adding a new behavior means recording and labeling new footage for it (the code already supports arbitrary class sets via `class_names`, so this is mostly a data problem, not a code problem). That doesn't scale to "any business, any situation" on its own. The more flexible path is reframing this as **anomaly detection**: learn what "normal" looks like per camera/installation and flag deviations, instead of learning fixed named categories. `analysis.py` already imports `IsolationForest` for exactly this but it was never wired into the main pipeline — that's the natural starting point.
+
+---
+
 ## 📜 License
 
 MIT License - see the [LICENSE](LICENSE) file for details.
