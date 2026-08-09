@@ -7,8 +7,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import f1_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 from tqdm import tqdm  # Para barra de progreso
 from torch.optim.lr_scheduler import ReduceLROnPlateau  # Scheduler de tasa de aprendizaje
@@ -36,39 +37,46 @@ def print_gpu_memory(message=""):
         logger.info(f"{message} GPU Memory: Total {t:.2f}GB | Reserved {r:.2f}GB | Allocated {a:.2f}GB | Free {f:.2f}GB")
 
 class VideoFrameDataset(Dataset):
-    def __init__(self, csv_dir, selected_features=None, max_frames=None, normalize=True, cache_data=True):
+    def __init__(self, csv_dir, selected_features=None, max_frames=None, normalize=True,
+                 cache_data=True, class_names=None):
         """
         Conjunto de datos para clasificación de videos con longitudes variables
-        
+
         Args:
             csv_dir (str): Directorio con archivos CSV de videos
             selected_features (list, optional): Lista de características a usar
             max_frames (int, optional): Número máximo de frames a considerar
             normalize (bool): Si se debe normalizar los datos
             cache_data (bool): Si se debe almacenar en caché los datos para acceso más rápido
+            class_names (list[str], optional): Nombres de clase, en el orden en que se
+                asignan sus índices (0, 1, 2, ...). Cada CSV debe llamarse
+                "<clase>_<nombre>.csv" (p. ej. "normal_3.csv", "merodeo_12.csv").
+                Por defecto: ['normal', 'merodeo', 'forcejeo'], las tres categorías
+                de comportamiento del proyecto.
         """
         self.videos = []
         self.labels = []
         self.video_lengths = []
         self.cache_data = cache_data
         self.data_cache = {}
-        
+        self.class_names = class_names if class_names is not None else ['normal', 'merodeo', 'forcejeo']
+        label_map = {name: idx for idx, name in enumerate(self.class_names)}
+
         logger.info(f"Cargando datos de {csv_dir}...")
         start_time = time.time()
-        
+
         # Verificar que el directorio existe
         if not os.path.exists(csv_dir):
             raise ValueError(f"El directorio {csv_dir} no existe")
-        
+
         csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
         if len(csv_files) == 0:
             raise ValueError(f"No se encontraron archivos CSV en {csv_dir}")
-        
-        # Procesamiento en paralelo para archivos grandes
-        normal_count = 0
-        suspicious_count = 0
-        
-        # Mapeo de etiquetas más flexible
+
+        # Conteo de videos por clase (para el log de resumen)
+        class_counts = {name: 0 for name in self.class_names}
+
+        # Mapeo de etiquetas según el prefijo del nombre de archivo
         for filename in tqdm(os.listdir(csv_dir), desc="Cargando videos"):
             if filename.endswith('.csv'):
                 filepath = os.path.join(csv_dir, filename)
@@ -109,16 +117,17 @@ class VideoFrameDataset(Dataset):
                 if max_frames is not None and len(features_array) > max_frames:
                     features_array = features_array[:max_frames]
 
-                # Mapeo de etiquetas basado en prefijo del nombre del archivo
-                if filename.startswith('normal_'):
-                    label = 0
-                    normal_count += 1
-                elif filename.startswith('sospechoso_'):
-                    label = 1
-                    suspicious_count += 1
-                else:
-                    logger.warning(f"Archivo {filename} ignorado - etiqueta no reconocida")
+                # Mapeo de etiquetas basado en el prefijo del nombre del archivo
+                # (todo lo que va antes del primer "_")
+                prefijo = filename.split('_', 1)[0]
+                if prefijo not in label_map:
+                    logger.warning(
+                        f"Archivo {filename} ignorado - prefijo '{prefijo}' no está en "
+                        f"class_names {self.class_names}"
+                    )
                     continue
+                label = label_map[prefijo]
+                class_counts[prefijo] += 1
 
                 # Guardar SIN normalizar todavía: normalizar aquí, por video,
                 # borraría la diferencia de escala de movimiento entre videos
@@ -138,8 +147,8 @@ class VideoFrameDataset(Dataset):
 
         elapsed_time = time.time() - start_time
         logger.info(f"Total de videos cargados: {len(self.videos)} en {elapsed_time:.2f} segundos")
-        logger.info(f"Videos normales: {normal_count}")
-        logger.info(f"Videos sospechosos: {suspicious_count}")
+        for name, count in class_counts.items():
+            logger.info(f"Videos '{name}': {count}")
         logger.info(f"Longitudes de videos - Min: {min(self.video_lengths)}, Max: {max(self.video_lengths)}, Promedio: {np.mean(self.video_lengths):.2f}")
 
         # Calcular dimensiones para realizar validaciones
@@ -252,21 +261,32 @@ class VideoClassificationLSTM(nn.Module):
     
     def forward(self, x, lengths=None):
         batch_size, seq_len, _ = x.size()
-        
+
         # Si se proporcionan longitudes, usarlas para empaquetar
         if lengths is not None:
             # Empaquetar secuencia para computación eficiente
             packed_input = nn.utils.rnn.pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=True)
             packed_output, (hidden, _) = self.lstm(packed_input)
             # Desempaquetar
-            output, _ = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True)
+            output, _ = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True, total_length=seq_len)
         else:
             output, (hidden, _) = self.lstm(x)
-        
+
         # Mecanismo de atención
-        attention_weights = torch.softmax(self.attention(output).squeeze(-1), dim=1)
+        attention_logits = self.attention(output).squeeze(-1)
+
+        if lengths is not None:
+            # Los videos más cortos que el máximo del batch quedan rellenos
+            # con ceros a partir de su longitud real: sin esta máscara, el
+            # softmax de atención podría repartir peso hacia esas posiciones
+            # de relleno en vez de ignorarlas.
+            posiciones = torch.arange(seq_len, device=output.device).unsqueeze(0)
+            mascara_padding = posiciones >= lengths.to(output.device).unsqueeze(1)
+            attention_logits = attention_logits.masked_fill(mascara_padding, float('-inf'))
+
+        attention_weights = torch.softmax(attention_logits, dim=1)
         context = torch.bmm(attention_weights.unsqueeze(1), output).squeeze(1)
-        
+
         # Clasificación
         logits = self.fc(context)
         
@@ -275,29 +295,50 @@ class VideoClassificationLSTM(nn.Module):
 class VideoClassificationMLP(nn.Module):
     def __init__(self, input_size, hidden_layers, num_classes, dropout_rate=0.3):
         super(VideoClassificationMLP, self).__init__()
-        
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        
+
+        # Se concatenan media y máximo por característica a lo largo del
+        # tiempo: el máximo conserva picos puntuales (p. ej. un pico de
+        # velocidad o aceleración) que un promedio por sí solo diluye.
+        pooled_size = input_size * 2
+
         layers = []
-        prev_size = input_size
-        
+        prev_size = pooled_size
+
         for hidden_size in hidden_layers:
             layers.append(nn.Linear(prev_size, hidden_size))
             layers.append(nn.BatchNorm1d(hidden_size))  # Normalización por lotes
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout_rate))
             prev_size = hidden_size
-        
+
         layers.append(nn.Linear(prev_size, num_classes))
-        
+
         self.model = nn.Sequential(*layers)
-    
+
     def forward(self, x, lengths=None):
-        # Convertir (batch, seq_len, features) a (batch, features, seq_len)
-        x = x.transpose(1, 2)
-        x = self.pool(x).squeeze(-1)
-        
-        return self.model(x)
+        # x: (batch, seq_len, features). Los videos más cortos que el máximo
+        # del batch están rellenos con ceros a partir de su longitud real:
+        # sin máscara, ese relleno se metería en el promedio y en el máximo.
+        batch_size, seq_len, _ = x.size()
+
+        if lengths is not None:
+            posiciones = torch.arange(seq_len, device=x.device).unsqueeze(0)
+            mascara = (posiciones < lengths.to(x.device).unsqueeze(1)).unsqueeze(-1).float()
+
+            suma = (x * mascara).sum(dim=1)
+            conteo = mascara.sum(dim=1).clamp(min=1)
+            mean_pool = suma / conteo
+
+            x_para_max = x.masked_fill(mascara == 0, float('-inf'))
+            max_pool, _ = x_para_max.max(dim=1)
+            max_pool = torch.where(torch.isinf(max_pool), torch.zeros_like(max_pool), max_pool)
+        else:
+            mean_pool = x.mean(dim=1)
+            max_pool, _ = x.max(dim=1)
+
+        pooled = torch.cat([mean_pool, max_pool], dim=1)
+
+        return self.model(pooled)
 
 def train_one_epoch(model, train_loader, criterion, optimizer, device, use_lengths=True):
     """
@@ -380,15 +421,16 @@ def validate(model, val_loader, criterion, device, use_lengths=True):
     
     return val_loss_avg, val_accuracy, all_predictions, all_labels
 
-def train_video_classifier(csv_dir, 
+def train_video_classifier(csv_dir,
                            model_type='lstm',  # 'lstm' o 'mlp'
                            selected_features=None,
                            max_frames=None,
+                           class_names=None,   # ['normal', 'merodeo', 'forcejeo'] por defecto
                            hidden_size=64,     # Para LSTM
                            num_layers=2,       # Para LSTM
                            hidden_layers=[64, 32],  # Para MLP
-                           learning_rate=0.001, 
-                           epochs=100, 
+                           learning_rate=0.001,
+                           epochs=100,
                            batch_size=16,
                            dropout_rate=0.3,
                            bidirectional=True,  # Para LSTM
@@ -410,20 +452,32 @@ def train_video_classifier(csv_dir,
     
     # Cargar datos
     logger.info("Cargando conjunto de datos...")
-    dataset = VideoFrameDataset(csv_dir, selected_features, max_frames)
-    
+    dataset = VideoFrameDataset(csv_dir, selected_features, max_frames, class_names=class_names)
+    num_classes = len(dataset.class_names)
+
     # Verificar si hay suficientes muestras para la estratificación
-    min_samples_per_class = min(dataset.labels.count(0), dataset.labels.count(1))
+    class_sample_counts = [dataset.labels.count(i) for i in range(num_classes)]
+    min_samples_per_class = min(class_sample_counts)
     if min_samples_per_class < 2:
-        logger.warning(f"Pocas muestras para estratificación. Clases: 0={dataset.labels.count(0)}, 1={dataset.labels.count(1)}")
+        counts_str = ", ".join(f"{name}={c}" for name, c in zip(dataset.class_names, class_sample_counts))
+        logger.warning(f"Pocas muestras para estratificación. Clases: {counts_str}")
         stratify = None
     else:
         stratify = dataset.labels
-    
-    # Dividir datos
-    train_indices, val_indices = train_test_split(
-        range(len(dataset)), test_size=0.2, stratify=stratify, random_state=42
-    )
+
+    # Dividir datos. Con datasets muy pequeños, incluso con >=2 muestras por
+    # clase, el tamaño del split de test puede terminar siendo menor que el
+    # número de clases (sklearn no puede estratificar en ese caso) — se cae
+    # a una división simple sin estratificar.
+    try:
+        train_indices, val_indices = train_test_split(
+            range(len(dataset)), test_size=0.2, stratify=stratify, random_state=42
+        )
+    except ValueError as e:
+        logger.warning(f"No se pudo estratificar el split ({e}). Usando división simple.")
+        train_indices, val_indices = train_test_split(
+            range(len(dataset)), test_size=0.2, stratify=None, random_state=42
+        )
 
     # Ajustar la normalización SOLO con el split de entrenamiento y aplicarla
     # a todo el dataset (evita fugas de información del set de validación y
@@ -460,8 +514,7 @@ def train_video_classifier(csv_dir,
     
     # Configurar modelo
     input_size = dataset.videos[0].shape[1]
-    num_classes = 2
-    
+
     # Seleccionar arquitectura
     if model_type.lower() == 'lstm':
         logger.info(f"Creando modelo LSTM con {hidden_size} unidades, {num_layers} capas, bidireccional={bidirectional}")
@@ -477,12 +530,14 @@ def train_video_classifier(csv_dir,
     else:
         logger.info(f"Creando modelo MLP con capas ocultas {hidden_layers}")
         model = VideoClassificationMLP(
-            input_size=input_size, 
-            hidden_layers=hidden_layers, 
-            num_classes=num_classes, 
+            input_size=input_size,
+            hidden_layers=hidden_layers,
+            num_classes=num_classes,
             dropout_rate=dropout_rate
         ).to(device)
-        use_lengths = False
+        # True: el MLP necesita las longitudes reales para no promediar/
+        # tomar el máximo sobre el padding (ver VideoClassificationMLP.forward)
+        use_lengths = True
     
     # Contar y loggear parámetros del modelo
     total_params = sum(p.numel() for p in model.parameters())
@@ -493,9 +548,10 @@ def train_video_classifier(csv_dir,
     print_gpu_memory("Después de crear el modelo")
     
     # Determinar pesos para clases desbalanceadas
-    if dataset.labels.count(0) != dataset.labels.count(1):
-        class_counts = [dataset.labels.count(0), dataset.labels.count(1)]
-        weights = torch.FloatTensor([len(dataset) / (2 * count) for count in class_counts]).to(device)
+    if len(set(class_sample_counts)) > 1:
+        weights = torch.FloatTensor(
+            [len(dataset) / (num_classes * count) for count in class_sample_counts]
+        ).to(device)
         logger.info(f"Usando pesos para clases desbalanceadas: {weights}")
         criterion = nn.CrossEntropyLoss(weight=weights)
     else:
@@ -505,10 +561,14 @@ def train_video_classifier(csv_dir,
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
     # Scheduler para reducir la tasa de aprendizaje cuando la pérdida se estanca
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    # verbose se quitó de ReduceLROnPlateau en versiones recientes de PyTorch
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
-    # Variables para early stopping
-    best_val_accuracy = 0
+    # Variables para early stopping. -1 (no 0) asegura que se guarde un
+    # checkpoint incluso si la primera época obtiene 0.00% de val_accuracy
+    # (posible con validaciones muy pequeñas): si no, "> best_val_accuracy"
+    # nunca sería cierto y nunca se guardaría ningún modelo.
+    best_val_accuracy = -1
     best_val_loss = float('inf')
     early_stopping_counter = 0
     
@@ -576,6 +636,7 @@ def train_video_classifier(csv_dir,
                 'train_loss': train_loss,
                 'model_type': model_type,
                 'input_size': input_size,
+                'class_names': dataset.class_names,
                 'hidden_size': hidden_size if model_type.lower() == 'lstm' else None,
                 'num_layers': num_layers if model_type.lower() == 'lstm' else None,
                 'hidden_layers': hidden_layers if model_type.lower() == 'mlp' else None,
@@ -627,16 +688,176 @@ def train_video_classifier(csv_dir,
     logger.info(f"Gráfico de entrenamiento guardado como training_history_{model_type}.png")
     
     # Cargar el mejor modelo para evaluación final
-    checkpoint = torch.load(f"best_model_{model_type}.pth")
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    # Evaluación final
-    _, final_val_accuracy, _, _ = validate(model, val_loader, criterion, device, use_lengths)
-    logger.info(f"Precisión final del mejor modelo: {final_val_accuracy:.2f}%")
-    
+    model_filename = f"best_model_{model_type}.pth"
+    if os.path.exists(model_filename):
+        # weights_only=False: el checkpoint incluye arrays de numpy (el
+        # scaler) además de los pesos, y es un archivo generado por nosotros
+        # mismos en el paso anterior de este mismo entrenamiento (fuente de
+        # confianza).
+        checkpoint = torch.load(model_filename, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        # Evaluación final
+        _, final_val_accuracy, _, _ = validate(model, val_loader, criterion, device, use_lengths)
+        logger.info(f"Precisión final del mejor modelo: {final_val_accuracy:.2f}%")
+    else:
+        logger.warning(f"No se guardó ningún checkpoint en {model_filename}; se omite la evaluación final.")
+
     return best_val_accuracy, history
 
-def grid_search(csv_dir, 
+def cross_validar(csv_dir,
+                  model_type='lstm',
+                  selected_features=None,
+                  max_frames=None,
+                  class_names=None,
+                  n_splits=5,
+                  hidden_size=64,
+                  num_layers=2,
+                  hidden_layers=[64, 32],
+                  learning_rate=0.001,
+                  epochs=100,
+                  batch_size=16,
+                  dropout_rate=0.3,
+                  bidirectional=True,
+                  patience=10,
+                  weight_decay=1e-5,
+                  random_state=42):
+    """
+    Evalúa LSTM/MLP con validación cruzada estratificada de n_splits sobre
+    TODO el dataset, en vez de un único split de entrenamiento/validación.
+
+    Con datasets chicos (decenas de videos), un solo split deja la métrica
+    de validación con muy pocas muestras (p. ej. 16 de 78) y demasiada
+    varianza para ser un número confiable — cada video vale varios puntos
+    porcentuales de accuracy. Esta función usa el mismo criterio que ya se
+    aplica a los modelos de árboles en modelo_arboles.py, para poder
+    comparar los 4 modelos con el mismo estándar.
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger.info(f"[CV {model_type}] Utilizando dispositivo: {device}")
+
+    if torch.cuda.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    dataset = VideoFrameDataset(csv_dir, selected_features, max_frames, class_names=class_names)
+    num_classes = len(dataset.class_names)
+    input_size = dataset.videos[0].shape[1]
+    labels_array = np.array(dataset.labels)
+
+    class_sample_counts = [dataset.labels.count(i) for i in range(num_classes)]
+    n_splits_efectivo = min(n_splits, min(class_sample_counts))
+    if n_splits_efectivo < 2:
+        logger.warning("No hay suficientes muestras por clase para validación cruzada.")
+        return None
+
+    skf = StratifiedKFold(n_splits=n_splits_efectivo, shuffle=True, random_state=random_state)
+    num_workers = min(4, os.cpu_count() or 1)
+
+    fold_accuracies = []
+    fold_f1s = []
+    y_true_oof = []
+    y_pred_oof = []
+
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(np.zeros(len(labels_array)), labels_array)):
+        logger.info(f"[CV {model_type}] Fold {fold_idx + 1}/{n_splits_efectivo}")
+
+        # Normalizar SOLO con el fold de entrenamiento de esta iteración
+        # (misma razón que en train_video_classifier: evita que el scaler
+        # vea datos del fold de validación)
+        dataset.fit_scaler(train_idx)
+
+        train_subset = torch.utils.data.Subset(dataset, train_idx)
+        val_subset = torch.utils.data.Subset(dataset, val_idx)
+
+        train_loader = DataLoader(
+            train_subset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=torch.cuda.is_available()
+        )
+        val_loader = DataLoader(
+            val_subset, batch_size=batch_size, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=torch.cuda.is_available()
+        )
+
+        if model_type.lower() == 'lstm':
+            model = VideoClassificationLSTM(
+                input_size=input_size, hidden_size=hidden_size, num_layers=num_layers,
+                num_classes=num_classes, dropout_rate=dropout_rate, bidirectional=bidirectional
+            ).to(device)
+        else:
+            model = VideoClassificationMLP(
+                input_size=input_size, hidden_layers=hidden_layers,
+                num_classes=num_classes, dropout_rate=dropout_rate
+            ).to(device)
+        use_lengths = True
+
+        fold_counts = [int((labels_array[train_idx] == i).sum()) for i in range(num_classes)]
+        if len(set(fold_counts)) > 1 and min(fold_counts) > 0:
+            weights = torch.FloatTensor(
+                [len(train_idx) / (num_classes * c) for c in fold_counts]
+            ).to(device)
+            criterion = nn.CrossEntropyLoss(weight=weights)
+        else:
+            criterion = nn.CrossEntropyLoss()
+
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+        best_val_accuracy = -1
+        best_preds, best_labels = None, None
+        early_stopping_counter = 0
+
+        for epoch in range(epochs):
+            train_loss, train_accuracy = train_one_epoch(
+                model, train_loader, criterion, optimizer, device, use_lengths
+            )
+            val_loss, val_accuracy, val_preds, val_labels = validate(
+                model, val_loader, criterion, device, use_lengths
+            )
+            scheduler.step(val_loss)
+
+            if val_accuracy > best_val_accuracy:
+                best_val_accuracy = val_accuracy
+                best_preds, best_labels = val_preds, val_labels
+                early_stopping_counter = 0
+            else:
+                early_stopping_counter += 1
+
+            if early_stopping_counter >= patience:
+                break
+
+        logger.info(f"[CV {model_type}] Fold {fold_idx + 1}: mejor val accuracy = {best_val_accuracy:.2f}% "
+                    f"({epoch + 1} épocas)")
+
+        fold_accuracies.append(best_val_accuracy / 100.0)
+        fold_f1s.append(f1_score(best_labels, best_preds, average='weighted', zero_division=0))
+        y_true_oof.extend(best_labels)
+        y_pred_oof.extend(best_preds)
+
+        # Liberar memoria de GPU entre folds
+        del model, optimizer, scheduler
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    acc_mean, acc_std = float(np.mean(fold_accuracies)), float(np.std(fold_accuracies))
+    f1_mean, f1_std = float(np.mean(fold_f1s)), float(np.std(fold_f1s))
+
+    etiquetas_posibles = list(range(num_classes))
+
+    logger.info(f"\n=== {model_type.upper()} - Validación cruzada {n_splits_efectivo}-fold ===")
+    logger.info(f"Accuracy: {acc_mean*100:.1f}% ± {acc_std*100:.1f}%  |  "
+                f"F1 (weighted): {f1_mean:.3f} ± {f1_std:.3f}")
+    logger.info(f"Accuracy por fold: {[f'{a*100:.1f}%' for a in fold_accuracies]}")
+    logger.info("\n" + classification_report(
+        y_true_oof, y_pred_oof, labels=etiquetas_posibles,
+        target_names=dataset.class_names, zero_division=0
+    ))
+    logger.info("Matriz de confusión out-of-fold (filas=real, columnas=predicho):")
+    logger.info("\n" + str(confusion_matrix(y_true_oof, y_pred_oof, labels=etiquetas_posibles)))
+
+    return {'accuracy_mean': acc_mean, 'accuracy_std': acc_std, 'f1_mean': f1_mean, 'f1_std': f1_std}
+
+def grid_search(csv_dir,
                 model_types=['lstm', 'mlp'],
                 hidden_sizes=[64, 128],           # Para LSTM
                 num_layers_options=[1, 2],        # Para LSTM
@@ -802,16 +1023,24 @@ def load_best_model(model_path, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Cargar checkpoint
-    checkpoint = torch.load(model_path, map_location=device)
-    
+    # Cargar checkpoint. weights_only=False: incluye arrays de numpy (el
+    # scaler) además de los pesos; se asume que model_path es un checkpoint
+    # propio (entrenado con este mismo código), no un archivo de origen
+    # externo/no confiable.
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+
+    # Modelos guardados antes de soportar múltiples clases no incluyen
+    # class_names: se asume el par binario original como respaldo
+    class_names = checkpoint.get('class_names', ['normal', 'sospechoso'])
+    num_classes = len(class_names)
+
     # Crear modelo basado en tipo guardado
     if checkpoint['model_type'].lower() == 'lstm':
         model = VideoClassificationLSTM(
             input_size=checkpoint['input_size'],
             hidden_size=checkpoint['hidden_size'],
             num_layers=checkpoint['num_layers'],
-            num_classes=2,
+            num_classes=num_classes,
             dropout_rate=0.3,
             bidirectional=checkpoint['bidirectional']
         ).to(device)
@@ -819,7 +1048,7 @@ def load_best_model(model_path, device=None):
         model = VideoClassificationMLP(
             input_size=checkpoint['input_size'],
             hidden_layers=checkpoint['hidden_layers'],
-            num_classes=2,
+            num_classes=num_classes,
             dropout_rate=0.3
         ).to(device)
     
@@ -847,7 +1076,8 @@ def load_scaler_from_checkpoint(checkpoint):
     scaler.n_features_in_ = len(mean)
     return scaler
 
-def predict_video(model, video_path, selected_features=None, max_frames=None, device=None, scaler=None):
+def predict_video(model, video_path, selected_features=None, max_frames=None, device=None,
+                   scaler=None, class_names=None):
     """
     Predecir la clase de un nuevo video.
 
@@ -856,7 +1086,13 @@ def predict_video(model, video_path, selected_features=None, max_frames=None, de
     ajustado únicamente con este video como método de respaldo, pero eso
     normaliza el video de forma distinta a como se entrenó el modelo y puede
     dar predicciones poco confiables.
+
+    `class_names` debe ser la misma lista con la que se entrenó el modelo
+    (ver checkpoint['class_names']). Por defecto ['normal', 'merodeo',
+    'forcejeo'].
     """
+    if class_names is None:
+        class_names = ['normal', 'merodeo', 'forcejeo']
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -922,19 +1158,18 @@ def predict_video(model, video_path, selected_features=None, max_frames=None, de
             
             # Obtener clase predicha
             _, predicted_class = torch.max(outputs, 1)
-            
+
             # Mapear a etiquetas legibles
-            class_names = ['normal', 'sospechoso']
             predicted_label = class_names[predicted_class.item()]
             confidence = probabilities[0][predicted_class.item()].item() * 100
-        
+
         return {
             'predicted_class': predicted_class.item(),
             'predicted_label': predicted_label,
             'confidence': confidence,
             'probabilities': {
-                'normal': probabilities[0][0].item() * 100,
-                'sospechoso': probabilities[0][1].item() * 100
+                name: probabilities[0][i].item() * 100
+                for i, name in enumerate(class_names)
             }
         }
     
@@ -953,31 +1188,35 @@ def ensemble_prediction(model_checkpoints, video_path, selected_features=None, m
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    if not model_checkpoints:
+        raise ValueError("Se requiere al menos un (modelo, checkpoint) para el ensemble")
+
+    # Se asume que todos los modelos del ensemble comparten las mismas clases
+    # (de lo contrario no tiene sentido promediar/votar entre ellos)
+    class_names = model_checkpoints[0][1].get('class_names', ['normal', 'merodeo', 'forcejeo'])
+
     # Obtener predicciones individuales
     predictions = []
     for model, checkpoint in model_checkpoints:
         try:
             scaler = load_scaler_from_checkpoint(checkpoint)
-            pred = predict_video(model, video_path, selected_features, max_frames, device, scaler)
+            model_class_names = checkpoint.get('class_names', class_names)
+            pred = predict_video(model, video_path, selected_features, max_frames, device, scaler, model_class_names)
             predictions.append(pred)
         except Exception as e:
             logger.error(f"Error en predicción de modelo: {str(e)}")
-    
+
     if not predictions:
         raise ValueError("Ningún modelo pudo realizar predicciones")
-    
+
     # Votar por la clase más común
     votes = [p['predicted_class'] for p in predictions]
     predicted_class = max(set(votes), key=votes.count)
-    
+
     # Calcular confianza promedio para la clase predicha
-    confidences = [p['probabilities']['normal'] if predicted_class == 0 else p['probabilities']['sospechoso'] 
-                  for p in predictions]
-    avg_confidence = sum(confidences) / len(confidences)
-    
-    # Mapear a etiqueta legible
-    class_names = ['normal', 'sospechoso']
     predicted_label = class_names[predicted_class]
+    confidences = [p['probabilities'][predicted_label] for p in predictions]
+    avg_confidence = sum(confidences) / len(confidences)
     
     return {
         'predicted_class': predicted_class,
@@ -987,17 +1226,19 @@ def ensemble_prediction(model_checkpoints, video_path, selected_features=None, m
     }
 
 if __name__ == '__main__':
-    # Directorio por defecto con archivos CSV de videos (relativo a la raíz
-    # del proyecto; este script vive en code/)
+    # Directorio por defecto con archivos CSV de videos: la salida directa de
+    # objectDetection.py (relativo a la raíz del proyecto; este script vive
+    # en code/)
     default_csv_directory = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'nuevoDatasetCSV'
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'informacion', 'csv'
     )
 
     # python script.py --mode train --model_type mlp
     import argparse
     parser = argparse.ArgumentParser(description='Entrenamiento y evaluación de clasificador de videos')
-    parser.add_argument('--mode', type=str, choices=['train', 'grid_search', 'predict'], default='train',
+    parser.add_argument('--mode', type=str, choices=['train', 'grid_search', 'predict', 'cross_validate'], default='train',
                        help='Modo de operación')
+    parser.add_argument('--n_splits', type=int, default=5, help='Número de folds para --mode cross_validate')
     parser.add_argument('--model_type', type=str, choices=['lstm', 'mlp'], default='lstm',
                        help='Tipo de modelo para entrenamiento')
     parser.add_argument('--csv_dir', type=str, default=default_csv_directory,
@@ -1008,7 +1249,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     csv_directory = args.csv_dir
 
-    if args.mode in ('train', 'grid_search') and not os.path.exists(csv_directory):
+    if args.mode in ('train', 'grid_search', 'cross_validate') and not os.path.exists(csv_directory):
         logger.error(f"El directorio {csv_directory} no existe")
         exit(1)
 
@@ -1056,6 +1297,39 @@ if __name__ == '__main__':
     elif args.mode == 'grid_search':
         logger.info("Realizando grid search...")
         grid_search(csv_directory)
+
+    elif args.mode == 'cross_validate':
+        logger.info(f"Validación cruzada ({args.n_splits}-fold) para {args.model_type}...")
+        # Mismos hiperparámetros que --mode train, para que la comparación
+        # entre split único y validación cruzada sea directa
+        if args.model_type == 'lstm':
+            cross_validar(
+                csv_dir=csv_directory,
+                model_type='lstm',
+                n_splits=args.n_splits,
+                hidden_size=128,
+                num_layers=2,
+                bidirectional=True,
+                learning_rate=0.001,
+                batch_size=32,
+                dropout_rate=0.3,
+                epochs=50,
+                patience=15,
+                max_frames=10000
+            )
+        else:
+            cross_validar(
+                csv_dir=csv_directory,
+                model_type='mlp',
+                n_splits=args.n_splits,
+                hidden_layers=[128, 64, 32],
+                learning_rate=0.001,
+                batch_size=32,
+                dropout_rate=0.3,
+                epochs=100,
+                patience=15,
+                max_frames=10000
+            )
     
     elif args.mode == 'predict':
         if not args.video_path:
@@ -1077,8 +1351,10 @@ if __name__ == '__main__':
         logger.info(f"Prediciendo clase para {args.video_path}...")
         model, checkpoint = load_best_model(args.model_path)
         scaler = load_scaler_from_checkpoint(checkpoint)
-        result = predict_video(model, args.video_path, scaler=scaler)
+        class_names = checkpoint.get('class_names', ['normal', 'merodeo', 'forcejeo'])
+        result = predict_video(model, args.video_path, scaler=scaler, class_names=class_names)
         
+        probs_str = ", ".join(f"{name}={p:.2f}%" for name, p in result['probabilities'].items())
         logger.info(f"Predicción: {result['predicted_label']}")
         logger.info(f"Confianza: {result['confidence']:.2f}%")
-        logger.info(f"Probabilidades: Normal={result['probabilities']['normal']:.2f}%, Sospechoso={result['probabilities']['sospechoso']:.2f}%")
+        logger.info(f"Probabilidades: {probs_str}")
