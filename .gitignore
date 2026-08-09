@@ -26,6 +26,7 @@ my_env/
 venv/
 env/
 comportamientos_env/
+comportamientos_env_gpu/
 entornoTT/
 
 # Modelos y resultados grandes (solo subir los finales)
@@ -70,6 +71,10 @@ videos_mejorados/
 *.tmp
 ~$*
 
+# Gráficas de entrenamientos locales (los checkpoints *.pth/*.pkl ya
+# quedan cubiertos por las reglas de "Modelos y resultados grandes" arriba)
+training_history*.png
+
 # IDE y editores
 .vscode/
 .idea/
@@ -93,3 +98,4 @@ Thumbs.db
 
 # Logs
 *.log
+training_log.txt

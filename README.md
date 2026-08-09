@@ -1,380 +1,186 @@
 # 🕵️ Suspicious Behavior Detection System
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.13-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-red.svg)](https://pytorch.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.x-orange.svg)](https://tensorflow.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org/)
 [![OpenCV](https://img.shields.io/badge/OpenCV-4.x-green.svg)](https://opencv.org/)
 [![YOLO](https://img.shields.io/badge/YOLOv8-purple.svg)](https://ultralytics.com/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Advanced Computer Vision System** for detecting suspicious behavior patterns in surveillance videos using deep learning and motion analysis.
+> Computer vision pipeline that watches short surveillance clips and classifies what's happening as **normal activity**, **loitering (merodeo)**, or **forced entry (forcejeo)** — built end-to-end from raw video to a trained, cross-validated classifier.
 
 ---
 
 ## 📋 Overview
 
-This project implements a sophisticated surveillance system capable of identifying three distinct behavioral patterns:
+| Behavior | Description | Risk level |
+|---|---|---|
+| 🟢 **Normal** | Regular activity — deliveries, routine entries | Low |
+| 🟡 **Merodeo** (loitering) | Repetitive, lingering movement near the property | Medium |
+| 🔴 **Forcejeo** (forced entry) | Abrupt, forceful action targeting doors/windows | High |
 
-| Behavior | Description | Risk Level |
-|-----------|-------------|-------------|
-| **🟢 Normal** | Daily activities like deliveries, regular entries | Low |
-| **🟡 Loitering** | Repetitive movement patterns near properties | Medium |
-| **🔴 Forced Entry** | Abrupt actions targeting doors/windows | High |
+The pipeline: **YOLOv8** (person detection) → a **from-scratch SORT-style tracker** (Kalman filter + Hungarian/IoU matching) → **19 hand-engineered kinematic/behavioral features per tracked person per frame** → a classifier (compared across 4 model families, evaluated with 5-fold cross-validation).
 
----
-
-## 🎯 Key Features
-
-### **🤖 AI-Powered Detection**
-- **YOLOv8** for real-time person detection
-- **Optical Flow** analysis for subtle movement capture
-- **Multi-object tracking** with consistent ID assignment
-- **False positive reduction** using DBSCAN clustering
-
-### **🧠 Advanced Analytics**
-- **36+ kinematic features** extraction
-- **Trajectory pattern analysis** (linearity, circularity, zigzag)
-- **Behavioral classification** using deep neural networks
-- **Real-time anomaly detection** with Isolation Forest
-
-### **🏗️ Model Architecture**
-- **Bidirectional LSTM** with attention mechanism
-- **Multi-layer Perceptron** for rapid classification
-- **Grid search optimization** for hyperparameters
-- **Early stopping** and learning rate scheduling
+Dataset: **78 real surveillance clips** (30 normal, 26 merodeo, 22 forcejeo), ranging from a few seconds to several minutes each.
 
 ---
 
-## 📊 Performance Metrics
+## 📊 Results (5-fold stratified cross-validation, 78 videos)
 
-| Model | Accuracy | F1-Score | Precision | Recall |
-|--------|-----------|-------------|----------|
-| **🏆 Bi-LSTM** | **72%** | **0.73** | **74%** | **72%** |
-| MLP | 69% | 0.54 | 66% | 66% |
-| LSTM Unidirectional | 43% | 0.43 | 45% | 41% |
+A single 80/20 train/test split on a dataset this size leaves the validation set at ~16 videos — each one is worth several percentage points of "accuracy," which makes a single-split number close to meaningless. Every result below is the mean ± standard deviation across 5 stratified folds, using **all 78 videos** (never mixed between train and validation within a fold).
 
----
+| Model | Accuracy | F1 (weighted) | Notes |
+|---|---|---|---|
+| 🏆 **Gradient Boosting** | **71.8% ± 9.5%** | 0.714 ± 0.105 | Best mean accuracy |
+| **Random Forest** | 70.3% ± 11.7% | 0.705 ± 0.116 | Close second |
+| **LSTM** (bidirectional + attention) | 60.2% ± 10.8% | 0.577 ± 0.109 | Struggles most on *forcejeo* (27% recall) |
+| **MLP** (mean+max pooling) | 57.7% ± 3.2% | 0.556 ± 0.042 | Lowest variance across folds |
 
-## 🔬 Feature Engineering
+*(random-chance baseline with 3 balanced classes: ~33%)*
 
-### **Kinematic Features**
-- Velocity and acceleration profiles
-- Inter-frame displacement analysis
-- Movement direction vectors
-- Pixel density in motion regions
+**Honest takeaway:** with ~78 videos, the two tree ensembles (trained on per-video aggregated statistics) generalize noticeably better than the sequence models (trained on the full per-frame sequence). This is a real, cross-validated result, not an artifact of a lucky split — it's also a good demonstration that "bigger model" isn't automatically "better model" when the dataset is small.
 
-### **Trajectory Analysis**
-- **Linearity detection**: Straight-line vs. complex paths
-- **Circularity patterns**: Repetitive circular movements
-- **Zigzag detection**: Erratic, suspicious paths
-- **Cyclic behavior**: Repetitive action patterns
-- **Convex hull area**: Spatial coverage analysis
-
-### **Behavioral Metrics**
-- **Posture classification**: Horizontal/vertical orientation
-- **Interaction detection**: Object/person proximity analysis
-- **Dwell time**: Duration in specific regions
-- **Movement density**: Activity concentration mapping
+The most important engineered feature across both tree models is `Linealidad` (trajectory straightness); `Tiempo_Permanencia` (dwell time — see below) consistently ranks in the top few features, confirming that "how long someone lingers in place" is genuine signal for loitering detection.
 
 ---
 
-## 🏗️ System Architecture
+## 🏗️ Pipeline architecture
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Video Input  │───▶│  YOLOv8 Detector │───▶│  Object Tracker  │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                │                        │
-                                ▼                        ▼
-                       ┌──────────────────┐   ┌─────────────────┐
-                       │ Optical Flow     │   │ Feature         │
-                       │ Analysis         │   │ Extraction      │
-                       └──────────────────┘   └─────────────────┘
-                                │                        │
-                                └──────────┬─────────────┘
-                                           ▼
-                                  ┌──────────────────┐
-                                  │  Classification │
-                                  │  Models (LSTM/ │
-                                  │  MLP)           │
-                                  └──────────────────┘
-                                           │
-                                           ▼
-                                  ┌──────────────────┐
-                                  │  Suspicious     │
-                                  │  Behavior Alert │
-                                  └──────────────────┘
+ video ─▶ YOLOv8 (person-only, class=0)
+            │
+            ▼
+   SORT-style tracker (code/tracking.py)
+   Kalman filter (constant-velocity) + IoU/Hungarian association
+   tolerates brief occlusion instead of spawning a new ID
+            │
+            ▼
+   Dense optical flow (Farneback) — fallback only,
+   used solely on frames where YOLO found no one
+            │
+            ▼
+   Feature extraction (code/featureExtraction.py)
+   19 features / frame / tracked person
+            │
+            ▼
+   ┌─────────────────────┬─────────────────────┐
+   │ LSTM / MLP           │ Random Forest /      │
+   │ (code/model.py)      │ Gradient Boosting    │
+   │ full per-frame        │ (code/entrenamiento/ │
+   │ sequence               │ modelo_arboles.py)   │
+   └─────────────────────┴─────────────────────┘
+            │
+            ▼
+   normal / merodeo / forcejeo + confidence
 ```
+
+### Extracted features (per frame, per tracked person)
+
+`Centroide_X/Y`, `Desplazamiento`, `Velocidad`, `Aceleracion`, `Direccion`, `Densidad` (motion density), `Postura` (bbox aspect ratio), `Patron_Movimiento` (linear/circular/zigzag/mixed), `Linealidad`, `Circularidad`, `Zigzag`, `Es_Ciclico` + `Frecuencia_Ciclo` + `Amplitud_Ciclo` (periodicity via autocorrelation), `Area_Trayectoria` (convex hull of the trajectory), `En_Interaccion` (proximity to another tracked person), and **`Tiempo_Permanencia`** — consecutive frames a person has stayed nearly stationary, used as a proxy for "dwell time" near a property without needing to hand-annotate where a door or window is in each scene.
 
 ---
 
 ## 🛠️ Installation
 
-### **Prerequisites**
 ```bash
-Python 3.8+
-CUDA 11.0+ (optional, for GPU acceleration)
-```
-
-### **Setup Environment**
-```bash
-# Clone the repository
 git clone https://github.com/ValeriaJahzeel/Monitoreo-Comportamientos-Sospechosos.git
 cd Monitoreo-Comportamientos-Sospechosos
 
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### **Dependencies**
-```txt
-torch>=1.9.0
-torchvision>=0.10.0
-tensorflow>=2.6.0
-opencv-python>=4.5.0
-ultralytics>=8.0.0
-numpy>=1.21.0
-pandas>=1.3.0
-scikit-learn>=1.0.0
-matplotlib>=3.4.0
-seaborn>=0.11.0
-scipy>=1.7.0
+**GPU note:** PyTorch's CUDA wheels currently lag behind the newest Python releases. If you're on **Python 3.13**, `pip install torch` gives you a CPU-only build. For CUDA acceleration, use **Python 3.11 or 3.12** and install torch from the CUDA index, e.g.:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
+On this project's dev machine (RTX 3050, 4GB), that made feature extraction ~5x faster than CPU — most of that gain actually came from skipping unnecessary work (dense optical flow and frame annotation were being computed on every frame even when not needed), not from the GPU alone.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick start
 
-### **Basic Usage**
+### Classify a video (the demo script)
+
+```bash
+python code/predecir.py --video path/to/video.mp4
+python code/predecir.py --video path/to/video.mp4 --modelo random_forest
+python code/predecir.py --video path/to/video.mp4 --guardar_video anotado.mp4
+```
+
+This runs the full pipeline (detection → tracking → feature extraction → classification) on a single video and prints the predicted class with per-class probabilities. `--guardar_video` additionally saves an annotated copy (bounding boxes, IDs, trajectories) for visual demos.
+
+### Extract features from a dataset
+
 ```python
 from code.objectDetection import ObjectDetector
-from code.featureExtraction import FeatureExtractor
-from code.model import train_video_classifier
 
-# Initialize detector
 detector = ObjectDetector()
-
-# Process video
-video_path = "path/to/your/video.mp4"
-csv_output = "output/features.csv"
-detector.procesar_video(video_path, csv_output)
-
-# Train model
-train_video_classifier(csv_output, model_type='lstm')
+detector.procesar_video("dataset/merodeo/3.mp4", "informacion/csv/merodeo_3.csv")
 ```
 
-### **Real-time Detection**
-```python
-# Initialize components
-detector = ObjectDetector()
-extractor = FeatureExtractor(history_size=30)
+CSV filenames must be prefixed with the class name (`normal_`, `merodeo_`, `forcejeo_`) — that prefix is how the training code assigns labels.
 
-# Process live video stream
-cap = cv2.VideoCapture(0)  # Webcam
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-    
-    # Detect and analyze
-    annotated_frame, features = detector.procesar_frame(frame)
-    
-    # Display results
-    cv2.imshow('Suspicious Behavior Detection', annotated_frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+### Train a model
+
+```bash
+# LSTM or MLP, single train/val split
+python code/model.py --mode train --model_type lstm --csv_dir informacion/csv
+python code/model.py --mode train --model_type mlp  --csv_dir informacion/csv
+
+# LSTM or MLP, proper 5-fold cross-validation (recommended for reporting results)
+python code/model.py --mode cross_validate --model_type lstm --csv_dir informacion/csv --n_splits 5
+
+# Tree models (always cross-validated, trains in seconds)
+python code/entrenamiento/modelo_arboles.py --csv_dir informacion/csv
+```
+
+### Predict with a trained model directly
+
+```python
+import code.model as model
+
+modelo, checkpoint = model.load_best_model("best_model_lstm.pth")
+scaler = model.load_scaler_from_checkpoint(checkpoint)
+resultado = model.predict_video(modelo, "informacion/csv/nuevo_video.csv", scaler=scaler,
+                                 class_names=checkpoint["class_names"])
 ```
 
 ---
 
-## 📁 Project Structure
+## 📁 Project structure
 
 ```
 Monitoreo-Comportamientos-Sospechosos/
-├── 📄 README.md                    # This file
-├── 📄 requirements.txt             # Python dependencies
-├── 📄 .gitignore                  # Git ignore rules
-├── 📁 code/                       # Source code
-│   ├── ⭐ featureExtraction.py    # Feature extraction engine
-│   ├── ⭐ objectDetection.py      # YOLO detection & tracking
-│   ├── ⭐ model.py               # ML models (LSTM/MLP)
-│   ├── ⭐ analysis.py            # Statistical analysis
-│   ├── 📓 readData.ipynb         # Data exploration
-│   ├── 🔧 filtrarCaracteristicas.py  # Feature filtering
-│   ├── 🔧 generador_forcejeo.py       # Force entry simulation
-│   └── 📁 entrenamiento/         # Training utilities
-├── 📁 models/                     # Trained models
-│   ├── 🧠 lstm_v3_final.h5     # Final LSTM model
-│   ├── 🧠 lstm_v3_completo.pkl   # Complete model
-│   └── ⚖️ best.weights.h5        # Best weights
-├── 📁 dataset/                    # Video datasets
-├── 📁 csv/                        # Extracted features
-└── � resultados/                 # Analysis results
+├── code/
+│   ├── objectDetection.py      # YOLOv8 detection + SORT tracking + orchestration
+│   ├── tracking.py             # Kalman filter + IoU/Hungarian tracker, built from scratch
+│   ├── featureExtraction.py    # Per-frame feature computation
+│   ├── model.py                # LSTM / MLP: dataset, training, cross-validation, inference
+│   ├── predecir.py             # End-to-end demo: video in, prediction out
+│   ├── analysis.py             # Exploratory analysis (clustering, PCA, outlier detection)
+│   ├── filtrarCaracteristicas.py  # Optional feature-set reduction
+│   ├── generador_forcejeo.py   # ⚠️ Synthetic data generator — see warning in the file itself
+│   └── entrenamiento/
+│       └── modelo_arboles.py   # Random Forest / Gradient Boosting + cross-validation
+├── dataset/                    # normal/, merodeo/, forcejeo/ — source videos (not versioned)
+├── informacion/csv/            # Extracted features, one CSV per video (not versioned)
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## 🎯 Model Training
+## ⚠️ Known limitations
 
-### **Hyperparameter Optimization**
-```python
-# Grid search for best parameters
-from code.model import grid_search
-
-results = grid_search(
-    csv_dir='./csv/',
-    model_types=['lstm', 'mlp'],
-    hidden_sizes=[64, 128],
-    learning_rates=[0.001, 0.0001],
-    batch_sizes=[16, 32]
-)
-```
-
-### **Custom Training**
-```python
-# Train with specific parameters
-accuracy, history = train_video_classifier(
-    csv_dir='./csv/',
-    model_type='lstm',
-    hidden_size=128,
-    num_layers=2,
-    learning_rate=0.001,
-    epochs=100,
-    batch_size=16,
-    bidirectional=True
-)
-```
-
----
-
-## 📈 Performance Analysis
-
-### **Confusion Matrix**
-```
-              Predicted
-              Normal  Loitering  Force Entry
-Actual Normal     85%      10%         5%
-      Loitering   15%      70%        15%
-      Force Entry  8%       12%        80%
-```
-
-### **Processing Speed**
-- **Real-time**: 25 FPS on GPU (RTX 3060)
-- **CPU-only**: 8 FPS (Intel i7)
-- **Memory usage**: ~2GB RAM
-- **Model size**: ~45MB
-
----
-
-## � Configuration
-
-### **Detection Parameters**
-```python
-# YOLO Configuration
-DETECTION_CONFIDENCE = 0.5
-IOU_THRESHOLD = 0.3
-MAX_DETECTIONS = 100
-
-# Tracking Parameters
-MAX_AGE = 30
-MIN_HITS = 3
-DISAPPEAR_THRESHOLD = 50
-```
-
-### **Feature Extraction**
-```python
-# Motion Analysis
-HISTORY_SIZE = 30          # Frames to analyze
-VELOCITY_THRESHOLD = 1.0     # px/frame
-ACCELERATION_THRESHOLD = 2.0  # px/frame²
-```
-
----
-
-## 🧪 Testing
-
-### **Run Unit Tests**
-```bash
-python -m pytest tests/
-```
-
-### **Benchmark Dataset**
-```bash
-# Download test dataset
-python scripts/download_test_data.py
-
-# Run evaluation
-python scripts/evaluate_model.py --model models/lstm_v3_final.h5
-```
-
----
-
-## 📊 Results & Analysis
-
-### **Generated Outputs**
-- **Annotated videos** with bounding boxes and trajectories
-- **CSV files** with extracted features per frame
-- **HTML reports** with statistical analysis
-- **Performance plots** and confusion matrices
-
-### **Visualization Examples**
-- Trajectory plots showing movement patterns
-- Heat maps of activity density
-- Time-series of suspicious behavior scores
-- ROC curves for model evaluation
-
----
-
-## 🤝 Contributing
-
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/AmazingFeature`)
-3. **Commit** your changes (`git commit -m 'Add some AmazingFeature'`)
-4. **Push** to the branch (`git push origin feature/AmazingFeature`)
-5. **Open** a Pull Request
-
-### **Development Guidelines**
-- Follow PEP 8 style guidelines
-- Add unit tests for new features
-- Update documentation for API changes
-- Use meaningful commit messages
+- **Small dataset.** 78 videos is enough to get a real, cross-validated signal above chance, but not enough to claim production-grade accuracy. Every number above has a wide confidence interval — treat the ranking (trees > sequence models) as more reliable than the exact percentages.
+- **LSTM confuses forcejeo with merodeo.** Out-of-fold recall for *forcejeo* is only 27% for the LSTM (vs. ~65-77% for the other two classes) — both behaviors can look similar in raw trajectory shape over short clips.
+- **Tracking still isn't perfect.** The custom SORT tracker massively reduced spurious ID churn (see commit history / PR description for before/after numbers), but fast motion or heavy occlusion in busier clips can still fragment a single person into multiple track IDs.
+- **`generador_forcejeo.py` produces synthetic data**, not real footage — it's kept in the repo but explicitly flagged; don't mix its output into reported metrics without saying so.
 
 ---
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgments
-
-- **Ultralytics** for YOLOv8 implementation
-- **OpenCV** community for computer vision tools
-- **PyTorch** team for deep learning framework
-- **Scikit-learn** for machine learning utilities
-
----
-
-## � Contact
-
-**Valeria Jahzeel** - [@ValeriaJahzeel](https://github.com/ValeriaJahzeel)
-
-- 📧 Email: [your-email@example.com]
-- 🔗 LinkedIn: [Your LinkedIn Profile]
-- 🐦 Twitter: [@YourTwitterHandle]
-
----
-
-<div align="center">
-
-**⭐ If this project helped you, please give it a star! ⭐**
-
-Made with ❤️ for [Security Research](https://github.com/topics/security-research)
-
-</div>
-
+MIT License - see the [LICENSE](LICENSE) file for details.
